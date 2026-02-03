@@ -28,6 +28,54 @@ We provide scripts to reproduce all key experiments:
 
 ---
 
+## Activation-sequence probe pipeline
+
+This repo includes an **activation-sequence probe** pipeline: extract per-token activations from a frozen LM layer, pretrain a small transformer (ActFormer) to predict the next-step activation, then train classifier probes (linear, MLP, or transformer-from-scratch) on pooled features and compare them on in-domain (ID) vs out-of-domain (OOD) data.
+
+### Quickstart (small run)
+
+```bash
+pip install -r requirements.txt
+# Use tiny config (2 docs, 2 layers) for speed. Set model.cache_dir in config if HF cache has permission issues.
+python -m src.extract_activations --config configs/tiny.yaml --split all --layer_index 0
+python -m src.extract_activations --config configs/tiny.yaml --split all --layer_index 1
+python -m src.layer_search --config configs/tiny.yaml
+python -m src.actformer.train --config configs/tiny.yaml
+python -m src.probe.run_comparison --config configs/tiny.yaml
+```
+
+Or run the full pipeline script:
+
+```bash
+./scripts/run_full_pipeline.sh configs/tiny.yaml
+```
+
+### Pipeline order (no leakage)
+
+1. **Layer search** – Linear probe on each candidate layer; writes `outputs/best_layer.json`.
+2. **Extract** – Extract activations at the best layer for ID (and optionally OOD) data. Splits are by **document** (or by file); train/val/test are disjoint.
+3. **ActFormer pretrain** – Next-step activation prediction on ID activations (optional subsequence sampling).
+4. **Probe comparison** – Train each probe type (e.g. raw_linear, actformer_linear) on ID; evaluate on ID test and each OOD set; save `comparison_metrics.json` and table.
+
+### Artifacts
+
+- `outputs/activations_*/layer_<L>/` – Memmap `activations.dat`, `index.json`, `meta.json`, `train_mean.npy`, `train_std.npy`.
+- `outputs/best_layer.json` – Best layer index and per-layer scores.
+- `outputs/actformer*/best.pt` – ActFormer checkpoint.
+- `outputs/probe_comparison*/comparison_metrics.json` – ID and OOD metrics per probe type.
+
+### Switching the base model
+
+In `configs/default.yaml`, set `model.base_model_name` to any HuggingFace causal LM (e.g. `gpt2`, `distilgpt2`, `meta-llama/Llama-3.1-8B-Instruct`). Use `model.cache_dir: .cache/huggingface` (or another writable path) if the default HF cache is not writable.
+
+### Tests
+
+```bash
+pytest tests/test_pipeline_e2e.py -v -m slow   # full e2e (needs extraction/network first time)
+```
+
+---
+
 ## 📚 Citation  
 If you find this work useful, please cite:  
 

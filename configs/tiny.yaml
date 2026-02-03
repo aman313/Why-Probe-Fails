@@ -1,0 +1,58 @@
+# Tiny config for fast tests (2 docs, small seq)
+seed: 42
+data:
+  data_dir: data/RS1
+  categories: [benign, malicious]
+  label_map: { benign: 0, malicious: 1 }
+  split_by_file: false
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  limit_docs: 2
+model:
+  base_model_name: distilgpt2
+  cache_dir: .cache/huggingface
+  layer_index: 0
+  tap_point: resid_post
+extraction:
+  max_seq_len: 64
+  stride: 32
+  batch_size_extract: 4
+  activation_dtype: float32
+  memmap_dir: outputs/activations_tiny
+  limit_docs: 2
+layer_search:
+  layer_search_layers: [0, 1]
+  layer_search_metric: macro_f1
+  layer_search_output: outputs/best_layer.json
+actformer:
+  d_model: 64
+  n_layers: 1
+  n_heads: 2
+  dropout: 0.1
+  ff_mult: 2
+  loss_type: mse
+  normalization: standardize_per_dim
+  causal: false
+  min_subseq_len: 2
+  max_subseq_len: 64
+pretrain:
+  lr: 1e-4
+  wd: 0.01
+  epochs: 1
+  batch_size: 4
+  max_steps: 50
+  output_dir: outputs/actformer_tiny
+probe:
+  pooling: mean
+  probe_model: linear
+  probe_train: { lr: 1e-3, epochs: 1, batch_size: 4, l2: 0.01 }
+comparison:
+  activations:
+    id:
+      memmap_dir: outputs/activations_tiny/layer_0
+      index_path: outputs/activations_tiny/layer_0/index.json
+    ood: []
+  probe_types: [raw_linear]
+  actformer_checkpoint: outputs/actformer_tiny/best.pt
+  output_dir: outputs/probe_comparison_tiny
