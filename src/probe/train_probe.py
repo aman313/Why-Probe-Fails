@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from src.actformer.model import ActFormer
 from src.probe.model import build_probe
+from src.utils.device import get_device
 from src.utils.dtypes import resolve_numpy_dtype
 from src.utils.io import load_json, load_yaml, save_json
 from src.utils.metrics import compute_metrics
@@ -45,7 +46,7 @@ def get_pooled_features_actformer(
     device: torch.device | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run activations through ActFormer, pool hidden states per doc. Returns (X, y)."""
-    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or get_device()
     meta = load_json(layer_dir / "meta.json")
     index = load_json(layer_dir / "index.json")
     af_cfg = config.get("actformer", {})
@@ -89,7 +90,8 @@ def get_pooled_features_actformer(
         for doc_id in doc_ids:
             chunks = by_doc[doc_id]
             parts = [np.array(arr[s : s + L]) for s, L in chunks]
-            seq = (np.concatenate(parts, axis=0).astype(np.float32) - mean) / std
+            seq = np.concatenate(parts, axis=0).astype(np.float32)
+            seq = ((seq - mean) / std).astype(np.float32)
             x = torch.from_numpy(seq).unsqueeze(0).to(device)
             mask = torch.ones(1, x.shape[1], dtype=torch.bool, device=device)
             _, _, hidden = actformer(x, mask)
@@ -173,7 +175,7 @@ def main() -> None:
         X_test_t = X_test_t.unsqueeze(1)
     else:
         probe = build_probe(probe_model_type, d_in, n_classes)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     probe = probe.to(device)
     opt = torch.optim.AdamW(probe.parameters(), lr=float(train_cfg.get("lr", 1e-3)), weight_decay=float(train_cfg.get("l2", 0.01)))
     epochs = int(train_cfg.get("epochs", 50))

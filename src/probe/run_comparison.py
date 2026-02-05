@@ -15,6 +15,7 @@ from src.probe.train_probe import (
     get_pooled_features_raw,
 )
 from src.probe.model import build_probe
+from src.utils.device import get_device
 from src.utils.io import load_json, load_yaml, save_json
 from src.utils.metrics import compute_metrics
 from src.utils.seed import set_seed
@@ -43,7 +44,13 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
         best_path = Path(config.get("layer_search", {}).get("layer_search_output", "outputs/best_layer.json"))
         if best_path.exists():
             layer_index = load_json(best_path).get("layer_index", layer_index)
-        layer_dir = id_memmap.parent / f"layer_{layer_index}" if id_memmap.name != f"layer_{layer_index}" else id_memmap
+        # memmap_dir can be (a) activations root (e.g. run_dir/activations) -> layer_dir = activations/layer_N
+        # or (b) a leaf like outputs/activations/id -> layer_dir = outputs/activations/layer_N
+        candidate = id_memmap / f"layer_{layer_index}"
+        if (candidate / "meta.json").exists():
+            layer_dir = candidate
+        else:
+            layer_dir = id_memmap.parent / f"layer_{layer_index}" if id_memmap.name != f"layer_{layer_index}" else id_memmap
     if not (layer_dir / "meta.json").exists():
         raise FileNotFoundError(f"ID activations not found: {layer_dir}")
 
@@ -52,7 +59,7 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
     raw_clf = None
     raw_scaler = None
     probe = None
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
 
     for probe_type in probe_types:
         parts = probe_type.split("_")

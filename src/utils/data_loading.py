@@ -96,7 +96,11 @@ def split_docs(
 
         ids = df["doc_id"].values
         n = len(ids)
-        if n < 3:
+        if train_ratio == 0 and val_ratio == 0:
+            id_train = np.array([], dtype=ids.dtype)
+            id_val = np.array([], dtype=ids.dtype)
+            id_test = ids
+        elif n < 3:
             # Minimal split: 1 train, 1 val, 0 test (or 1/1/0)
             id_train = ids[:1]
             id_val = ids[1:2] if n >= 2 else np.array([], dtype=ids.dtype)

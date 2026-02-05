@@ -64,6 +64,16 @@ Or run the full pipeline script:
 - `outputs/actformer*/best.pt` – ActFormer checkpoint.
 - `outputs/probe_comparison*/comparison_metrics.json` – ID and OOD metrics per probe type.
 
+### Apple Silicon (MPS)
+
+On Macs with Apple Silicon, the pipeline uses the MPS backend when available. If you see CPU being used instead, run the diagnostic from the repo root:
+
+```bash
+PYTHONPATH=. python scripts/diagnose_mps.py
+```
+
+It will print PyTorch version, platform (arm64 vs x86_64), and whether MPS is built and available. Ensure PyTorch is installed for Mac ARM (e.g. `pip install torch` from a native arm64 shell) and macOS is 12.3+.
+
 ### Switching the base model
 
 In `configs/default.yaml`, set `model.base_model_name` to any HuggingFace causal LM (e.g. `gpt2`, `distilgpt2`, `meta-llama/Llama-3.1-8B-Instruct`). Use `model.cache_dir: .cache/huggingface` (or another writable path) if the default HF cache is not writable.

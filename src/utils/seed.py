@@ -1,9 +1,10 @@
 """Reproducibility: set seeds for PyTorch, numpy, and Python random."""
 import random
-from typing import Optional
 
 import numpy as np
 import torch
+
+from .device import get_device
 
 
 def set_seed(seed: int) -> None:
@@ -15,3 +16,5 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+    if get_device().type == "mps" and getattr(torch.mps, "manual_seed", None) is not None:
+        torch.mps.manual_seed(seed)

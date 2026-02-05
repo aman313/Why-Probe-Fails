@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 
 from src.actformer.data import ActivationSequenceDataset, collate_activation_sequences
 from src.actformer.model import ActFormer
+from src.utils.device import get_device
 from src.utils.io import ensure_dir, load_json, load_yaml
 from src.utils.seed import set_seed
 
@@ -89,7 +90,7 @@ def main() -> None:
         collate_fn=collate_activation_sequences,
         num_workers=0,
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     model = ActFormer(
         d_in=hidden_size,
         d_model=d_model,

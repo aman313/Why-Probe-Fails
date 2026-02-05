@@ -12,6 +12,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.utils.data_loading import load_and_split
+from src.utils.device import get_device
 from src.utils.io import ensure_dir, load_yaml, save_json
 from src.utils.seed import set_seed
 
@@ -100,6 +101,8 @@ def extract_activations(
     kwargs = {"trust_remote_code": True}
     if cache_dir:
         kwargs["cache_dir"] = str(Path(cache_dir).expanduser().resolve())
+    device = get_device()
+    device_map = "auto" if device.type == "cuda" else None
     print(f"[extract] Loading {base_model_name} ...")
     tokenizer = AutoTokenizer.from_pretrained(
         base_model_name, padding_side="left", **kwargs
@@ -109,11 +112,14 @@ def extract_activations(
     model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
         torch_dtype=torch.float32,
-        device_map="auto" if torch.cuda.is_available() else None,
+        device_map=device_map,
         output_hidden_states=True,
         **kwargs,
     ).eval()
-    device = next(model.parameters()).device
+    if device_map is None:
+        model = model.to(device)
+    else:
+        device = next(model.parameters()).device
     hidden_size = model.config.hidden_size
 
     # First pass: tokenize each doc and get chunk ranges

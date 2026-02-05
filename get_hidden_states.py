@@ -1,10 +1,12 @@
 import argparse
+import os
 import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from src.utils.device import get_device
 from tqdm import tqdm
 from typing import List, Tuple
-import os
 import numpy as np
 import warnings
 import glob
@@ -147,6 +149,8 @@ def main():
     args = parser.parse_args()
 
     # Model / tokenizer
+    device = get_device()
+    device_map = "auto" if device.type == "cuda" else None
     print(f"[load] {args.model_path}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, padding_side='left')
     if tokenizer.pad_token is None:
@@ -155,10 +159,12 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=torch.bfloat16,
-        device_map="auto" if torch.cuda.is_available() else None,
+        device_map=device_map,
         trust_remote_code=True,
         output_hidden_states=True,
     ).eval()
+    if device_map is None:
+        model = model.to(device)
 
     print(f"[folders] Using base folders: malicious, benign, cleaned")
 
