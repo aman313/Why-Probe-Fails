@@ -1,0 +1,76 @@
+# ID: 80% train (70 train + 10 val) from alpaca + beaver; 20% held-out ID eval.
+# OOD eval: dolly, harmbench, advbench (set in comparison.activations.ood).
+seed: 42
+data:
+  data_dir: data/id_alpaca_beaver
+  categories: [benign, malicious]
+  label_map: { benign: 0, malicious: 1 }
+  split_by_file: false
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  limit_docs: null
+model:
+  base_model_name: distilgpt2
+  cache_dir: .cache/huggingface
+  layer_index: 3
+  tap_point: resid_post
+extraction:
+  max_seq_len: 256
+  stride: 128
+  batch_size_extract: 8
+  activation_dtype: float32
+  memmap_dir: outputs/activations
+  limit_docs: null
+layer_search:
+  layer_search_layers: [0, 1, 2, 3, 4, 5]
+  layer_search_metric: macro_f1
+  layer_search_output: outputs/best_layer.json
+actformer:
+  d_model: 256
+  n_layers: 2
+  n_heads: 4
+  dropout: 0.1
+  ff_mult: 4
+  loss_type: gaussian_nll
+  normalization: standardize_per_dim
+  causal: false
+  min_subseq_len: 2
+  max_subseq_len: 256
+  augment: { noise_std: 0.0, input_dropout: 0.0 }
+pretrain:
+  lr: 1e-4
+  wd: 0.01
+  epochs: 3
+  batch_size: 32
+  grad_clip: 1.0
+  warmup_steps: 100
+  eval_every: 200
+  save_every: 500
+  max_steps: null
+  output_dir: outputs/actformer
+probe:
+  pooling: mean
+  probe_model: linear
+  transformer_probe: { d_model: 256, n_layers: 2, n_heads: 4, ff_mult: 4, dropout: 0.1, pool: mean }
+  probe_train: { lr: 1e-3, epochs: 50, batch_size: 32, l2: 0.01 }
+  augment: { noise_std: 0.0, mixup_alpha: 0.0 }
+  baselines_on_raw_activations: true
+comparison:
+  activations:
+    id:
+      memmap_dir: outputs/activations/id
+      index_path: outputs/activations/id/index.json
+    ood:
+      - name: dolly
+        memmap_dir: outputs/activations_ood/dolly/layer_3
+      - name: harmbench
+        memmap_dir: outputs/activations_ood/harmbench/layer_3
+      - name: advbench
+        memmap_dir: outputs/activations_ood/advbench/layer_3
+  actformer_checkpoint: outputs/actformer/best.pt
+  probe_types: [raw_linear, raw_mlp, raw_transformer, actformer_linear, actformer_mlp, actformer_transformer]
+  pooling: mean
+  probe_train: { lr: 1e-3, epochs: 50, batch_size: 32, l2: 0.01 }
+  metrics: [accuracy, macro_f1, auroc]
+  output_dir: outputs/probe_comparison

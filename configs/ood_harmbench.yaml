@@ -1,0 +1,23 @@
+# OOD extraction: Harmbench (malicious). All rows in test split. Use with --layer_index from best_layer.json.
+seed: 42
+data:
+  data_dir: data/ood_harmbench
+  categories: [malicious]
+  label_map: { malicious: 1 }
+  split_by_file: false
+  train_ratio: 0.0
+  val_ratio: 0.0
+  test_ratio: 1.0
+  limit_docs: null
+model:
+  base_model_name: distilgpt2
+  cache_dir: .cache/huggingface
+  layer_index: 3
+  tap_point: resid_post
+extraction:
+  max_seq_len: 256
+  stride: 128
+  batch_size_extract: 8
+  activation_dtype: float32
+  memmap_dir: outputs/activations_ood/harmbench
+  limit_docs: null
