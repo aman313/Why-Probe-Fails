@@ -1,4 +1,5 @@
 # Generated / cache
+.env
 .cache/
 outputs/
 *.pyc

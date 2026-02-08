@@ -29,12 +29,14 @@ class ActivationSequenceDataset(Dataset):
         min_subseq_len: int = 2,
         max_subseq_len: int = 256,
         use_subsequence_sampling: bool = True,
+        objective: str = "next_token",
         seed: int | None = None,
     ) -> None:
         self.split = split
         self.min_subseq_len = min_subseq_len
         self.max_subseq_len = max_subseq_len
         self.use_subsequence_sampling = use_subsequence_sampling
+        self.objective = objective
         self.rng = np.random.default_rng(seed)
         meta = load_json(meta_path)
         self.total_tokens = meta["total_tokens"]
@@ -63,21 +65,27 @@ class ActivationSequenceDataset(Dataset):
         seq = (seq - self.mean) / self.std
         return seq
 
-    def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, i: int) -> tuple[torch.Tensor, ...]:
         entry = self.entries[i]
         seq = self._get_sequence(entry)
         T = seq.shape[0]
         if self.use_subsequence_sampling and T >= self.min_subseq_len:
+            min_len = self.min_subseq_len if self.objective == "next_token" else max(1, self.min_subseq_len)
             L = min(
-                self.rng.integers(self.min_subseq_len, min(T, self.max_subseq_len) + 1),
+                self.rng.integers(min_len, min(T, self.max_subseq_len) + 1),
                 T,
             )
-            if L < 2:
+            if self.objective == "next_token" and L < 2:
                 L = 2
             max_start = T - L
             start = self.rng.integers(0, max_start + 1) if max_start >= 0 else 0
             seq = seq[start : start + L]
             T = seq.shape[0]
+        if self.objective == "mlm":
+            if T < 1:
+                seq = np.concatenate([seq, seq], axis=0)
+            return (torch.from_numpy(seq),)
+        # next_token: shift by one
         if T < 2:
             seq = np.concatenate([seq, seq], axis=0)
             T = 2
@@ -107,3 +115,36 @@ def collate_activation_sequences(
         y_pad[i, :L] = y
         mask[i, :L] = True
     return x_pad, y_pad, mask
+
+
+def make_mlm_collator(
+    mask_ratio: float = 0.15,
+    pad_value: float = 0.0,
+):
+    """
+    Factory for MLM collator. Returns (x, padding_mask, mlm_mask).
+    x: (B, T_max, d) original sequences (model replaces masked positions internally).
+    padding_mask: (B, T_max) True = valid token.
+    mlm_mask: (B, T_max) True = masked for prediction.
+    """
+
+    def collate(
+        batch: list[tuple[torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        seqs = [item[0] for item in batch]
+        max_len = max(s.shape[0] for s in seqs)
+        d = seqs[0].shape[1]
+        B = len(seqs)
+        x = torch.full((B, max_len, d), pad_value, dtype=seqs[0].dtype)
+        padding_mask = torch.zeros(B, max_len, dtype=torch.bool)
+        mlm_mask = torch.zeros(B, max_len, dtype=torch.bool)
+        for i, seq in enumerate(seqs):
+            L = seq.shape[0]
+            x[i, :L] = seq
+            padding_mask[i, :L] = True
+            n_mask = max(1, int(L * mask_ratio))
+            indices = torch.randperm(L)[:n_mask]
+            mlm_mask[i, indices] = True
+        return x, padding_mask, mlm_mask
+
+    return collate

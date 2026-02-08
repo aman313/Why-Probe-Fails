@@ -32,9 +32,11 @@ actformer:
   n_heads: 4
   dropout: 0.1
   ff_mult: 4
+  objective: next_token  # next_token | mlm
   loss_type: gaussian_nll
   normalization: standardize_per_dim
-  causal: false
+  causal: true
+  mlm_mask_ratio: 0.15
   min_subseq_len: 2
   max_subseq_len: 256
   augment: { noise_std: 0.0, input_dropout: 0.0 }

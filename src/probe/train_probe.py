@@ -1,6 +1,7 @@
 """
-Train classifier probe on pooled activations (raw or ActFormer).
-Usage: python -m src.probe.train_probe --config configs/default.yaml [--use_actformer true|false]
+Train classifier probe on pooled activations (raw) or fine-tune ActFormer probe.
+Usage: python -m src.probe.train_probe --config configs/default.yaml [--probe_type raw_linear|raw_mlp|actformer_finetuned]
+Legacy: --use_actformer true runs frozen ActFormer + linear (actformer_linear); false = raw_linear.
 """
 import argparse
 from pathlib import Path
@@ -9,14 +10,17 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 
-from src.actformer.model import ActFormer
+from src.actformer.model import ActFormer, load_actformer_with_head
+from src.probe.data import DocLevelProbeDataset, collate_doc_level_probe
 from src.probe.model import build_probe
 from src.utils.device import get_device
 from src.utils.dtypes import resolve_numpy_dtype
 from src.utils.io import load_json, load_yaml, save_json
 from src.utils.metrics import compute_metrics
 from src.utils.seed import set_seed
+from src.utils.wandb_utils import init_wandb, load_dotenv_for_wandb
 
 # Reuse layer_search's pooled-feature loading for raw activations
 from src.layer_search import load_pooled_features_per_doc
@@ -58,7 +62,7 @@ def get_pooled_features_actformer(
         ff_mult=af_cfg.get("ff_mult", 4),
         dropout=0.0,
         loss_type=af_cfg.get("loss_type", "mse"),
-        causal=af_cfg.get("causal", False),
+        causal=af_cfg.get("causal", True),
     )
     ckpt = torch.load(actformer_ckpt, map_location="cpu", weights_only=True)
     actformer.load_state_dict(ckpt["model"])
@@ -105,10 +109,144 @@ def get_pooled_features_actformer(
     return np.stack(vectors), np.array(y_list)
 
 
+def train_actformer_finetuned(
+    layer_dir: Path,
+    config: dict,
+    actformer_ckpt: Path,
+    n_classes: int,
+    out_dir: Path,
+) -> dict[str, float]:
+    """Fine-tune ActFormer with classification head on doc-level (seq, label). Train on train split only; return test metrics."""
+    set_seed(config.get("seed", 42))
+    af_cfg = config.get("actformer", {})
+    finetune_cfg = config.get("comparison", {}).get("actformer_finetune", config.get("probe", {}).get("actformer_finetune", {}))
+    if not finetune_cfg:
+        finetune_cfg = config.get("probe", {}).get("probe_train", {})
+    meta = load_json(layer_dir / "meta.json")
+    d_in = meta["hidden_size"]
+    max_len = finetune_cfg.get("max_len")
+    train_ds = DocLevelProbeDataset(
+        layer_dir / "activations.dat",
+        layer_dir / "index.json",
+        layer_dir / "meta.json",
+        layer_dir / "train_mean.npy",
+        layer_dir / "train_std.npy",
+        split="train",
+        max_len=max_len,
+    )
+    if len(train_ds) == 0:
+        print("[probe] No train data for actformer_finetuned. Exiting.")
+        return {"accuracy": float("nan"), "macro_f1": float("nan"), "auroc": float("nan")}
+    device = get_device()
+    model = load_actformer_with_head(
+        checkpoint_path=str(actformer_ckpt),
+        d_in=d_in,
+        d_model=af_cfg.get("d_model", 256),
+        n_layers=af_cfg.get("n_layers", 2),
+        n_heads=af_cfg.get("n_heads", 4),
+        n_classes=n_classes,
+        ff_mult=af_cfg.get("ff_mult", 4),
+        dropout=af_cfg.get("dropout", 0.1),
+        loss_type=af_cfg.get("loss_type", "mse"),
+        causal=af_cfg.get("causal", True),
+        pool=finetune_cfg.get("pooling", "mean"),
+        freeze_body=finetune_cfg.get("freeze_body", False),
+    )
+    model = model.to(device)
+    opt = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=float(finetune_cfg.get("lr", 1e-4)),
+        weight_decay=float(finetune_cfg.get("l2", finetune_cfg.get("wd", 0.01))),
+    )
+    batch_size = int(finetune_cfg.get("batch_size", 16))
+    epochs = int(finetune_cfg.get("epochs", 10))
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_doc_level_probe,
+        num_workers=0,
+    )
+    for epoch in range(epochs):
+        model.train()
+        train_loss_sum = 0.0
+        n_batches = 0
+        for xb, mask, yb in train_loader:
+            xb, mask, yb = xb.to(device), mask.to(device), yb.to(device)
+            opt.zero_grad()
+            logits = model(xb, mask=mask)
+            loss = nn.functional.cross_entropy(logits, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), finetune_cfg.get("grad_clip", 1.0))
+            opt.step()
+            train_loss_sum += loss.item()
+            n_batches += 1
+        try:
+            import wandb
+            if wandb.run is not None:
+                mean_loss = train_loss_sum / max(n_batches, 1)
+                wandb.log({"train_loss": mean_loss}, step=epoch)
+        except Exception:
+            pass
+    out_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": model.state_dict(), "actformer_checkpoint": str(actformer_ckpt)}, out_dir / "actformer_probe.pt")
+    # Evaluate on val and test
+    val_ds = DocLevelProbeDataset(
+        layer_dir / "activations.dat",
+        layer_dir / "index.json",
+        layer_dir / "meta.json",
+        layer_dir / "train_mean.npy",
+        layer_dir / "train_std.npy",
+        split="val",
+        max_len=max_len,
+    )
+    test_ds = DocLevelProbeDataset(
+        layer_dir / "activations.dat",
+        layer_dir / "index.json",
+        layer_dir / "meta.json",
+        layer_dir / "train_mean.npy",
+        layer_dir / "train_std.npy",
+        split="test",
+        max_len=max_len,
+    )
+    model.eval()
+    def eval_split(ds):
+        if len(ds) == 0:
+            return np.array([]), np.array([]), np.array([])
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_doc_level_probe, num_workers=0)
+        preds, probs, labels = [], [], []
+        with torch.no_grad():
+            for xb, mask, yb in loader:
+                xb, mask = xb.to(device), mask.to(device)
+                logits = model(xb, mask=mask)
+                preds.append(logits.argmax(dim=1).cpu().numpy())
+                probs.append(torch.softmax(logits, dim=1).cpu().numpy())
+                labels.append(yb.numpy())
+        return np.concatenate(preds), np.vstack(probs), np.concatenate(labels)
+    y_pred_test, y_prob_test, y_test = eval_split(test_ds)
+    if len(y_test) == 0:
+        metrics = {"accuracy": float("nan"), "macro_f1": float("nan"), "auroc": float("nan")}
+    else:
+        metrics = compute_metrics(y_test, y_pred_test, y_prob_test, ["accuracy", "macro_f1", "auroc"])
+    try:
+        import wandb
+        if wandb.run is not None:
+            y_pred_val, y_prob_val, y_val = eval_split(val_ds)
+            if len(y_val) > 0:
+                val_metrics = compute_metrics(y_val, y_pred_val, y_prob_val, ["accuracy", "macro_f1", "auroc"])
+                wandb.log({"val/accuracy": val_metrics["accuracy"], "val/macro_f1": val_metrics["macro_f1"], "val/auroc": val_metrics["auroc"]})
+            wandb.log({"test/accuracy": metrics["accuracy"], "test/macro_f1": metrics["macro_f1"], "test/auroc": metrics["auroc"]})
+    except Exception:
+        pass
+    save_json(metrics, out_dir / "probe_metrics.json")
+    return metrics
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/default.yaml")
-    parser.add_argument("--use_actformer", type=str, default="false", choices=["true", "false"])
+    parser.add_argument("--probe_type", type=str, default="raw_linear", choices=["raw_linear", "raw_mlp", "actformer_finetuned"])
+    parser.add_argument("--use_actformer", type=str, default="", choices=["true", "false", ""], help="Legacy: true=actformer_linear, false=raw_linear")
     args = parser.parse_args()
     config = load_yaml(args.config)
     set_seed(config.get("seed", 42))
@@ -122,30 +260,49 @@ def main() -> None:
         best = load_json(best_layer_path)
         layer_index = int(best["layer_index"]) if isinstance(best["layer_index"], int) else best["layer_index"]
     layer_dir = memmap_dir / f"layer_{layer_index}"
-    use_actformer = args.use_actformer.lower() == "true"
+    if args.use_actformer:
+        probe_type = "actformer_finetuned" if args.use_actformer == "true" else "raw_linear"
+    else:
+        probe_type = args.probe_type
     pooling = probe_cfg.get("pooling", "mean")
     probe_model_type = probe_cfg.get("probe_model", "linear")
     train_cfg = probe_cfg.get("probe_train", {})
     label_map = config.get("data", {}).get("label_map", {})
     n_classes = len(set(label_map.values())) if label_map else 2
+    out_dir = Path(config.get("comparison", {}).get("output_dir", "outputs/probe_comparison"))
 
-    if use_actformer:
+    load_dotenv_for_wandb(config)
+    wandb_cfg = config.get("wandb", {})
+    init_wandb(
+        project=wandb_cfg.get("probe_project", "probe-train"),
+        name=f"probe_{probe_type}",
+        config={
+            "probe_type": probe_type,
+            "layer_index": layer_index,
+            "n_classes": n_classes,
+            "lr": train_cfg.get("lr"),
+            "epochs": train_cfg.get("epochs"),
+            "batch_size": train_cfg.get("batch_size"),
+        },
+        entity=wandb_cfg.get("entity"),
+    )
+
+    if probe_type == "actformer_finetuned":
         actformer_ckpt = Path(config.get("pretrain", {}).get("output_dir", "outputs/actformer")) / "best.pt"
         if not actformer_ckpt.exists():
             actformer_ckpt = Path(config.get("pretrain", {}).get("output_dir", "outputs/actformer_tiny")) / "best.pt"
-        X_train, y_train = get_pooled_features_actformer(layer_dir, "train", actformer_ckpt, config, pooling)
-        X_val, y_val = get_pooled_features_actformer(layer_dir, "val", actformer_ckpt, config, pooling)
-        try:
-            X_test, y_test = get_pooled_features_actformer(layer_dir, "test", actformer_ckpt, config, pooling)
-        except (ValueError, FileNotFoundError):
-            X_test = np.zeros((0, X_train.shape[1]), dtype=np.float32)
-            y_test = np.array([], dtype=np.int64)
-        d_in = X_train.shape[1]
-    else:
-        X_train, y_train = get_pooled_features_raw(layer_dir, "train")
-        X_val, y_val = get_pooled_features_raw(layer_dir, "val")
-        X_test, y_test = get_pooled_features_raw(layer_dir, "test")
-        d_in = X_train.shape[1]
+        if not actformer_ckpt.exists():
+            print(f"[probe] ActFormer checkpoint not found: {actformer_ckpt}. Run pretrain first.")
+            return
+        metrics = train_actformer_finetuned(layer_dir, config, actformer_ckpt, n_classes, out_dir)
+        print(f"[probe] actformer_finetuned metrics: {metrics} saved to {out_dir}")
+        return
+
+    # Raw baselines: pooled features
+    X_train, y_train = get_pooled_features_raw(layer_dir, "train")
+    X_val, y_val = get_pooled_features_raw(layer_dir, "val")
+    X_test, y_test = get_pooled_features_raw(layer_dir, "test")
+    d_in = X_train.shape[1]
 
     if len(X_train) == 0:
         print("[probe] No train data. Exiting.")
@@ -153,7 +310,6 @@ def main() -> None:
     if len(np.unique(y_train)) < 2:
         print("[probe] Only one class in train; probe will predict that class only.")
 
-    scaler = torch.nn.Identity()
     X_train_t = torch.from_numpy(X_train).float()
     X_val_t = torch.from_numpy(X_val).float()
     X_test_t = torch.from_numpy(X_test).float()
@@ -174,7 +330,7 @@ def main() -> None:
         X_val_t = X_val_t.unsqueeze(1)
         X_test_t = X_test_t.unsqueeze(1)
     else:
-        probe = build_probe(probe_model_type, d_in, n_classes)
+        probe = build_probe("mlp" if probe_type == "raw_mlp" else "linear", d_in, n_classes)
     device = get_device()
     probe = probe.to(device)
     opt = torch.optim.AdamW(probe.parameters(), lr=float(train_cfg.get("lr", 1e-3)), weight_decay=float(train_cfg.get("l2", 0.01)))
@@ -198,7 +354,13 @@ def main() -> None:
                 logits = probe(X_val_t.to(device))
                 pred = logits.argmax(dim=1).cpu().numpy()
                 prob = torch.softmax(logits, dim=1).cpu().numpy()
-            _ = compute_metrics(y_val, pred, prob, ["accuracy", "macro_f1", "auroc"])
+            val_metrics = compute_metrics(y_val, pred, prob, ["accuracy", "macro_f1", "auroc"])
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.log({"val/accuracy": val_metrics["accuracy"], "val/macro_f1": val_metrics["macro_f1"], "val/auroc": val_metrics["auroc"]}, step=epoch)
+            except Exception:
+                pass
 
     probe.eval()
     with torch.no_grad():
@@ -209,7 +371,12 @@ def main() -> None:
         metrics = {"accuracy": float("nan"), "macro_f1": float("nan"), "auroc": float("nan")}
     else:
         metrics = compute_metrics(y_test, y_pred, y_prob, ["accuracy", "macro_f1", "auroc"])
-    out_dir = Path(config.get("comparison", {}).get("output_dir", "outputs/probe_comparison"))
+    try:
+        import wandb
+        if wandb.run is not None:
+            wandb.log({"test/accuracy": metrics["accuracy"], "test/macro_f1": metrics["macro_f1"], "test/auroc": metrics["auroc"]})
+    except Exception:
+        pass
     out_dir.mkdir(parents=True, exist_ok=True)
     save_json(metrics, out_dir / "probe_metrics.json")
     torch.save(probe.state_dict(), out_dir / "probe.pt")

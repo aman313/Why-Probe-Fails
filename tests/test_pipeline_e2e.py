@@ -67,10 +67,15 @@ def test_pipeline_e2e():
     assert r.returncode == 0, r.stderr
     assert (REPO_ROOT / "outputs/actformer_tiny/best.pt").exists() or (REPO_ROOT / "outputs/actformer_tiny/last.pt").exists()
 
-    # 3) Probe comparison
+    # 3) Probe comparison (trains raw_linear and fine-tunes ActFormer probe; evaluates on ID and OOD)
     r = run([sys.executable, "-m", "src.probe.run_comparison", "--config", CONFIG])
     assert r.returncode == 0, r.stderr
-    assert (REPO_ROOT / "outputs/probe_comparison_tiny/comparison_metrics.json").exists()
+    comp_path = REPO_ROOT / "outputs/probe_comparison_tiny/comparison_metrics.json"
+    assert comp_path.exists()
+    from src.utils.io import load_json
+    comp = load_json(comp_path)
+    assert "raw_linear" in comp
+    assert "actformer_finetuned" in comp
 
 
 @pytest.mark.slow

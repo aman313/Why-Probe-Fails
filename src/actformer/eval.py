@@ -31,7 +31,7 @@ def evaluate(
         ff_mult=af_cfg.get("ff_mult", 4),
         dropout=0.0,
         loss_type=af_cfg.get("loss_type", "mse"),
-        causal=af_cfg.get("causal", False),
+        causal=af_cfg.get("causal", True),
     )
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     model.load_state_dict(ckpt["model"])

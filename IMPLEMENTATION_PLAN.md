@@ -7,32 +7,36 @@ This document is the single plan: design overview first, then step-by-step imple
 ## Design overview
 
 **Goal**  
-Extract per-token activations from a frozen LM layer, pretrain a small transformer (ActFormer) to predict the next-step activation, then use ActFormer hidden states (or raw activations) as features to train classifier probes. Compare probe types on in-domain (ID) vs out-of-domain (OOD) data.
+Extract per-token activations from a frozen LM layer; pretrain a small transformer (ActFormer) to model activation sequences at that layer (self-supervised, no labels). For the downstream probe task, **fine-tune this pretrained ActFormer** (with a classification head) to classify activations using labels. Compare this **ActFormer probe** (pretrain then fine-tune) to **baselines that train a classifier from scratch on raw activations** (no pretraining), on in-domain (ID) vs out-of-domain (OOD) data.
 
 **Repo fit**  
 - Data: existing CSV layout under `data/RS1` (etc.) with `prompt` column; labels from folder (`benign` → 0, `malicious` → 1). No HuggingFace datasets; use pandas + glob.
 - **Base model**: Any HuggingFace causal LM (default `distilgpt2`) whose activations we extract. Switch by changing `model.base_model_name` in config (e.g. `gpt2`, `meta-llama/Llama-3.1-8B-Instruct`). Set `model.cache_dir` to a path inside the repo (e.g. `.cache/huggingface`) if the default HF cache has permission issues.
-- **Probe**: The classifier trained to predict labels from (pooled) activations is **linear**, **mlp**, or **transformer**; the **transformer probe is implemented from scratch** (no pretrained weights).
+- **Probe types**: (1) **ActFormer probe** = pretrained ActFormer + classification head, **fine-tuned** on the labeled task (ActFormer weights are updated). (2) **Baselines** = linear or MLP (and optionally transformer) trained **from scratch** on **raw** (pooled) activations only—no ActFormer, no pretraining.
 - Document: one row = one document. Doc-level split = by row (or by `source_file` for strict ID/OOD). Train/val/test doc_ids disjoint.
+- **Probe dataset and layer choice**: The config’s **`data`** section defines the **probe training dataset** (labeled data for the downstream classification task, e.g. `data/RS1` or `data/id_alpaca_beaver`). **Layer search** uses this dataset only: for each candidate layer in `layer_search.layer_search_layers`, (1) extract activations from the probe dataset at that layer (or use existing memmaps under `extraction.memmap_dir`), (2) train a **linear probe** (e.g. logistic regression on mean-pooled activations per doc), (3) evaluate on the validation set. The layer with the best validation metric (e.g. `layer_search_metric: macro_f1`) is written to `layer_search_output` (e.g. `outputs/best_layer.json`). That **best layer** is then used for all later steps: extraction at best layer for ID/OOD and for any pretrain data (e.g. TinyStories).
 - Layer search runs first; extraction for ActFormer and probes is only at the **best layer** (one activation dataset per run).
 - Probe comparison assumes **layer search and extraction are already done** for ID and each OOD set; comparison script only loads pre-extracted memmaps.
 
 **Activation dataset for ActFormer pretraining**  
-- Built from memmap + index (from extraction at the chosen layer). Per sequence: load slice `[start:start+length]`, normalize with train mean/std, form (x, y) with x = positions 0..T-1, y = positions 1..T (next-step). Optional **subsequence sampling**: random contiguous slice (start, length) for more views per document.
-- ActFormer trains on this self-supervised task only; probe training uses the same memmap (pooled raw or ActFormer pooled).
+- Built from memmap + index (from extraction at the chosen layer). Per sequence: load slice `[start:start+length]`, normalize with train mean/std, form (x, y) with x = positions 0..T-1, y = positions 1..T (next-step), or MLM objective. Optional **subsequence sampling**: random contiguous slice (start, length) for more views per document.
+- ActFormer trains on this self-supervised task only. For the **ActFormer probe**, we fine-tune the pretrained ActFormer on a doc-level (sequence, label) dataset built from the same memmap.
 
 **Probe comparison (ID vs OOD)**  
-- **Config**: `activations.id` (memmap_dir + index_path), `activations.ood` (list of `name`, memmap_dir, index_path), `probe_types` (e.g. raw_linear, actformer_linear), `actformer_checkpoint`, `pooling`, `probe_train`, `metrics`, `output_dir`.
-- **Main function**: For each probe type, get pooled features for ID train/val/test and each OOD set; train probe on ID train only; evaluate on ID test and each OOD; build table (probe_type × metric × dataset); save `comparison_metrics.json`, `comparison_table.csv`, optional plot.
+- **Config**: `activations.id`, `activations.ood`, `probe_types` (e.g. `raw_linear`, `raw_mlp`, `actformer_finetuned`), `actformer_checkpoint` (pretrained ActFormer), `actformer_finetune` (lr, epochs, batch_size, freeze_body, pooling), `probe_train` (for raw baselines), `metrics`, `output_dir`.
+- **Main function**: For **actformer_finetuned**, load pretrained ActFormer, add head, fine-tune on ID train (doc-level sequences); evaluate on ID test and each OOD. For **raw_linear** / **raw_mlp**, get pooled raw features, train classifier from scratch on ID train; evaluate on ID test and each OOD. Build table (probe_type × metric × dataset); save `comparison_metrics.json`, `comparison_table.csv`, optional plot.
 
 **Augmentation**  
 - ActFormer: **subsequence sampling** (random contiguous slice) as main augmentation; optional input noise/dropout.  
 - Probe: optional Gaussian noise and same-class mixup on pooled features.
 
+**Pretrain dataset (optional)**  
+- The **pretrain dataset** is configured under `pretrain.data` (data_dir, categories, label_map, split ratios) and `pretrain.memmap_dir` (where to write its activations). If `pretrain.memmap_dir` is set, ActFormer pretrain reads from that path at the best layer; otherwise it uses `extraction.memmap_dir` (probe/ID activations). Layer search always uses the **probe dataset** (config `data`). When using a separate pretrain dataset, run extraction at best layer for that dataset (`python -m src.extract_activations --config <config> --for_pretrain --layer_index <best> --split all`) before ActFormer pretrain, or use the train script’s `--run_extraction` flag.
+
 **Pipeline order**  
 1. Layer search (on ID) → `best_layer.json`.  
-2. Extract activations at best layer for ID and for each OOD set.  
-3. (Optional) ActFormer pretrain on ID activations.  
+2. Extract activations at best layer for ID and for each OOD set. If using a separate pretrain dataset, also run extraction with `--for_pretrain` at best layer.  
+3. (Optional) ActFormer pretrain on activations (from `pretrain.memmap_dir` if set, else ID activations).  
 4. Run probe comparison (train each probe type on ID, evaluate on ID test + each OOD).
 
 **Probe comparison config (reference)**  
@@ -43,10 +47,16 @@ activations:
     - name: RS2
       memmap_dir: ...
       index_path: ...
-probe_types: [raw_linear, raw_mlp, actformer_linear, actformer_mlp]
-actformer_checkpoint: ...
+probe_types: [raw_linear, raw_mlp, actformer_finetuned]
+actformer_checkpoint: ...   # path to pretrained ActFormer (e.g. outputs/actformer/best.pt)
+actformer_finetune:         # for actformer_finetuned probe
+  lr: 1e-4
+  epochs: 10
+  batch_size: 16
+  freeze_body: false        # if true, only train classification head
+  pooling: mean
 pooling: mean
-probe_train: { lr, epochs, batch_size, l2 }
+probe_train: { lr, epochs, batch_size, l2 }   # for raw_linear, raw_mlp
 metrics: [accuracy, macro_f1, auroc]
 output_dir: ...
 ```
@@ -174,13 +184,13 @@ Each step lists deliverables, then **Testing and validation** to run before movi
 
 **Deliverables**
 
-- `src/probe/train_probe.py`: load ID memmap + index; for each split (train/val/test) get **pooled features** (mean / last / attention_pool over tokens). Feature source: **raw** (normalized activations) or **ActFormer** (run sequences through ActFormer, pool `last_hidden_state`). Train linear or MLP classifier on ID train; evaluate on ID val and ID test. Save probe checkpoint and metrics JSON. CLI: `python -m src.probe.train_probe --config configs/default.yaml --use_actformer true|false` (and probe type from config).
-- Shared helper: `get_pooled_features(memmap, index_entries, feature_source, actformer, pooling)`.
+- `src/probe/train_probe.py`: (1) **Raw baselines**: load ID memmap + index; get **pooled features** (mean / last over tokens) per doc; train linear or MLP classifier on ID train; evaluate on ID val and ID test. (2) **ActFormer probe (fine-tuned)**: load pretrained ActFormer from checkpoint, add classification head (ActFormerWithHead: pool + Linear to n_classes); build doc-level dataset (sequence, label) per document from memmap+index; **fine-tune** ActFormer + head on ID train (cross-entropy); evaluate on ID val and ID test. Save probe checkpoint and metrics JSON. CLI: `python -m src.probe.train_probe --config configs/default.yaml [--probe_type raw_linear|raw_mlp|actformer_finetuned]`.
+- Shared helper: `get_pooled_features(memmap, index_entries, pooling)` for raw baselines. For actformer_finetuned: doc-level dataset and ActFormerWithHead fine-tuning loop (no mlm_mask in forward).
 
 **Testing and validation**
 
-- Train **linear probe on raw** for 1 epoch on 2-doc data: `python -m src.probe.train_probe --config configs/default.yaml --use_actformer false`. Assert metrics JSON and probe checkpoint (or sklearn model dump) exist; metrics contain accuracy and macro_f1 (and auroc if binary).
-- Train **linear probe on ActFormer** for 1 epoch (use ActFormer from Step 6): same config, `--use_actformer true`. Assert run completes and metrics are saved.
+- Train **linear probe on raw** for 1 epoch on 2-doc data: `--probe_type raw_linear`. Assert metrics JSON and probe checkpoint exist; metrics contain accuracy and macro_f1 (and auroc if binary).
+- Train **ActFormer probe (fine-tuned)** for 1 epoch: `--probe_type actformer_finetuned` with pretrained ActFormer checkpoint. Assert run completes, checkpoint and metrics saved; ActFormer weights are updated (or only head if freeze_body=true).
 - Assert no data leakage: probe is trained only on train split; val/test are not used for fitting.
 
 ---
@@ -190,13 +200,13 @@ Each step lists deliverables, then **Testing and validation** to run before movi
 **Deliverables**
 
 - `src/probe/baselines.py`: raw probe (already in train_probe); optional PCA on pooled train activations, then linear probe. Function that runs baseline and returns metrics.
-- `src/probe/run_comparison.py` (or extend train_probe): `run_probe_comparison(config)` as in the earlier design. Config: `activations.id`, `activations.ood` (list of name + memmap_dir + index_path), `probe_types` (e.g. raw_linear, raw_mlp, actformer_linear, actformer_mlp), `actformer_checkpoint`, `pooling`, `probe_train`, `metrics`, `output_dir`. For each probe type: get features for ID train/val/test and each OOD set; train on ID train; evaluate on ID test and each OOD; build table (probe_type × metric × dataset); save `comparison_metrics.json`, `comparison_table.csv`, optional plot.
-- CLI: `python -m src.probe.run_comparison --config configs/default.yaml` (or a dedicated comparison config).
+- `src/probe/run_comparison.py`: `run_probe_comparison(config)`. Config: `activations.id`, `activations.ood`, `probe_types` (e.g. `raw_linear`, `raw_mlp`, `actformer_finetuned`), `actformer_checkpoint` (pretrained ActFormer), `actformer_finetune`, `pooling`, `probe_train`, `metrics`, `output_dir`. For **raw_linear** / **raw_mlp**: get pooled raw features for ID and each OOD; train classifier on ID train; evaluate on ID test and each OOD. For **actformer_finetuned**: load fine-tuned ActFormerWithHead (or run fine-tuning if not yet done), evaluate on ID test and each OOD using doc-level sequences. Build table (probe_type × metric × dataset); save `comparison_metrics.json`, `comparison_table.csv`, optional plot.
+- CLI: `python -m src.probe.run_comparison --config configs/default.yaml`.
 
 **Testing and validation**
 
-- With **tiny ID and one OOD** memmap (e.g. 2-doc ID and 2-doc OOD from same extraction layout): run comparison for `probe_types: [raw_linear, actformer_linear]`. Assert `comparison_metrics.json` has structure `{ probe_type: { id: {...}, ood: { OOD_NAME: {...} } } }`; table has columns for id and OOD_NAME; no crash.
-- Assert baselines (raw_linear, raw_mlp) and actformer_linear all appear in the table with numeric values.
+- With **tiny ID and one OOD** memmap: run comparison for `probe_types: [raw_linear, actformer_finetuned]`. Assert `comparison_metrics.json` has structure `{ probe_type: { id: {...}, ood: { OOD_NAME: {...} } } }`; table has columns for id and OOD_NAME; no crash.
+- Assert raw_linear, raw_mlp, and actformer_finetuned all appear in the table with numeric values when present.
 
 ---
 

@@ -1,5 +1,6 @@
 """
 Probe comparison: train each probe type on ID, evaluate on ID test and each OOD set.
+Supports raw_linear, raw_mlp, actformer_finetuned.
 Usage: python -m src.probe.run_comparison --config configs/default.yaml
 """
 import argparse
@@ -8,17 +9,56 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
-from src.probe.baselines import run_raw_probe
 from src.probe.train_probe import (
-    get_pooled_features_actformer,
     get_pooled_features_raw,
+    train_actformer_finetuned,
 )
+from src.probe.data import DocLevelProbeDataset, collate_doc_level_probe
 from src.probe.model import build_probe
+from src.actformer.model import load_actformer_with_head
 from src.utils.device import get_device
 from src.utils.io import load_json, load_yaml, save_json
 from src.utils.metrics import compute_metrics
 from src.utils.seed import set_seed
+from src.utils.wandb_utils import init_wandb, load_dotenv_for_wandb
+
+
+def _eval_actformer_finetuned_on_split(
+    layer_dir: Path,
+    model: torch.nn.Module,
+    device: torch.device,
+    split: str,
+    batch_size: int,
+    max_len: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run fine-tuned ActFormerWithHead on a split; return (y_pred, y_prob, y_true)."""
+    ds = DocLevelProbeDataset(
+        layer_dir / "activations.dat",
+        layer_dir / "index.json",
+        layer_dir / "meta.json",
+        layer_dir / "train_mean.npy",
+        layer_dir / "train_std.npy",
+        split=split,
+        max_len=max_len,
+    )
+    if len(ds) == 0:
+        return np.array([]), np.array([]), np.array([])
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_doc_level_probe, num_workers=0)
+    preds, probs, labels = [], [], []
+    model.eval()
+    with torch.no_grad():
+        for xb, mask, yb in loader:
+            xb, mask = xb.to(device), mask.to(device)
+            logits = model(xb, mask=mask)
+            preds.append(logits.argmax(dim=1).cpu().numpy())
+            probs.append(torch.softmax(logits, dim=1).cpu().numpy())
+            labels.append(yb.numpy())
+    y_pred = np.concatenate(preds)
+    y_prob = np.vstack(probs)
+    y_true = np.concatenate(labels)
+    return y_pred, y_prob, y_true
 
 
 def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
@@ -28,7 +68,7 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
     activations = comp.get("activations", {})
     id_cfg = activations.get("id", {})
     ood_list = activations.get("ood", [])
-    probe_types = comp.get("probe_types", ["raw_linear", "actformer_linear"])
+    probe_types = comp.get("probe_types", ["raw_linear", "actformer_finetuned"])
     actformer_ckpt = Path(comp.get("actformer_checkpoint", "outputs/actformer/best.pt"))
     pooling = comp.get("pooling", "mean")
     probe_train = comp.get("probe_train", {})
@@ -44,8 +84,6 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
         best_path = Path(config.get("layer_search", {}).get("layer_search_output", "outputs/best_layer.json"))
         if best_path.exists():
             layer_index = load_json(best_path).get("layer_index", layer_index)
-        # memmap_dir can be (a) activations root (e.g. run_dir/activations) -> layer_dir = activations/layer_N
-        # or (b) a leaf like outputs/activations/id -> layer_dir = outputs/activations/layer_N
         candidate = id_memmap / f"layer_{layer_index}"
         if (candidate / "meta.json").exists():
             layer_dir = candidate
@@ -60,8 +98,62 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
     raw_scaler = None
     probe = None
     device = get_device()
+    af_cfg = config.get("actformer", {})
+    finetune_cfg = comp.get("actformer_finetune", {})
 
     for probe_type in probe_types:
+        if probe_type == "actformer_finetuned":
+            if not actformer_ckpt.exists():
+                results[probe_type] = {"id": {m: float("nan") for m in metrics_list}, "ood": {}}
+                continue
+            actformer_probe_path = out_dir / "actformer_probe.pt"
+            if not actformer_probe_path.exists():
+                train_actformer_finetuned(layer_dir, config, actformer_ckpt, n_classes, out_dir)
+            ckpt = torch.load(actformer_probe_path, map_location="cpu", weights_only=True)
+            pretrained_ckpt_path = ckpt.get("actformer_checkpoint", str(actformer_ckpt))
+            meta = load_json(layer_dir / "meta.json")
+            model = load_actformer_with_head(
+                checkpoint_path=pretrained_ckpt_path,
+                d_in=meta["hidden_size"],
+                d_model=af_cfg.get("d_model", 256),
+                n_layers=af_cfg.get("n_layers", 2),
+                n_heads=af_cfg.get("n_heads", 4),
+                n_classes=n_classes,
+                ff_mult=af_cfg.get("ff_mult", 4),
+                dropout=af_cfg.get("dropout", 0.1),
+                loss_type=af_cfg.get("loss_type", "mse"),
+                causal=af_cfg.get("causal", True),
+                pool=finetune_cfg.get("pooling", "mean"),
+                freeze_body=finetune_cfg.get("freeze_body", False),
+            )
+            model.load_state_dict(ckpt["model"], strict=True)
+            model = model.to(device).eval()
+            batch_size = int(finetune_cfg.get("batch_size", 16))
+            max_len = finetune_cfg.get("max_len")
+            y_pred, y_prob, y_id_test = _eval_actformer_finetuned_on_split(
+                layer_dir, model, device, "test", batch_size, max_len
+            )
+            if len(y_id_test) == 0:
+                id_metrics = {m: float("nan") for m in metrics_list}
+            else:
+                id_metrics = compute_metrics(y_id_test, y_pred, y_prob, metrics_list)
+            ood_metrics = {}
+            for ood_cfg in ood_list:
+                name = ood_cfg.get("name", "ood")
+                ood_dir = Path(str(ood_cfg.get("memmap_dir", ood_cfg.get("index_path", "."))).replace("/index.json", ""))
+                if not (ood_dir / "meta.json").exists():
+                    ood_metrics[name] = {m: float("nan") for m in metrics_list}
+                    continue
+                y_pred_o, y_prob_o, y_ood = _eval_actformer_finetuned_on_split(
+                    ood_dir, model, device, "test", batch_size, max_len
+                )
+                if len(y_ood) == 0:
+                    ood_metrics[name] = {m: float("nan") for m in metrics_list}
+                else:
+                    ood_metrics[name] = compute_metrics(y_ood, y_pred_o, y_prob_o, metrics_list)
+            results[probe_type] = {"id": id_metrics, "ood": ood_metrics}
+            continue
+
         parts = probe_type.split("_")
         if len(parts) >= 2:
             feature_source = parts[0]
@@ -76,6 +168,7 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
             continue
 
         if use_actformer:
+            from src.probe.train_probe import get_pooled_features_actformer
             X_train, y_train = get_pooled_features_actformer(layer_dir, "train", actformer_ckpt, config, pooling)
             X_val, y_val = get_pooled_features_actformer(layer_dir, "val", actformer_ckpt, config, pooling)
             X_id_test, y_id_test = get_pooled_features_actformer(layer_dir, "test", actformer_ckpt, config, pooling)
@@ -148,7 +241,7 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
         ood_metrics: dict[str, dict[str, float]] = {}
         for ood_cfg in ood_list:
             name = ood_cfg.get("name", "ood")
-            ood_dir = Path(ood_cfg.get("memmap_dir", ood_cfg.get("index_path", ".")).replace("/index.json", ""))
+            ood_dir = Path(str(ood_cfg.get("memmap_dir", ood_cfg.get("index_path", "."))).replace("/index.json", ""))
             if not (ood_dir / "meta.json").exists():
                 ood_metrics[name] = {m: float("nan") for m in metrics_list}
                 continue
@@ -177,6 +270,24 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
         results[probe_type] = {"id": id_metrics, "ood": ood_metrics}
 
     save_json(results, out_dir / "comparison_metrics.json")
+    load_dotenv_for_wandb(config)
+    wandb_cfg = config.get("wandb", {})
+    if init_wandb(
+        project=wandb_cfg.get("comparison_project", "probe-comparison"),
+        name="comparison",
+        config={"probe_types": probe_types, "output_dir": str(out_dir)},
+        entity=wandb_cfg.get("entity"),
+    ):
+        try:
+            import wandb
+            for pt, data in results.items():
+                for metric, val in data.get("id", {}).items():
+                    wandb.log({f"id/{pt}/{metric}": val})
+                for ood_name, ood_data in data.get("ood", {}).items():
+                    for metric, val in ood_data.items():
+                        wandb.log({f"ood/{pt}/{ood_name}/{metric}": val})
+        except Exception:
+            pass
     return results
 
 

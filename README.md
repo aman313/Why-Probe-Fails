@@ -30,7 +30,7 @@ We provide scripts to reproduce all key experiments:
 
 ## Activation-sequence probe pipeline
 
-This repo includes an **activation-sequence probe** pipeline: extract per-token activations from a frozen LM layer, pretrain a small transformer (ActFormer) to predict the next-step activation, then train classifier probes (linear, MLP, or transformer-from-scratch) on pooled features and compare them on in-domain (ID) vs out-of-domain (OOD) data.
+This repo includes an **activation-sequence probe** pipeline: extract per-token activations from a frozen LM layer, **pretrain** a small transformer (ActFormer) to model activation sequences (self-supervised), then **fine-tune** that ActFormer (with a classification head) as the probe and compare it to **baselines** that train a classifier from scratch on raw activations—all evaluated on in-domain (ID) vs out-of-domain (OOD) data.
 
 ### Quickstart (small run)
 
@@ -52,10 +52,10 @@ Or run the full pipeline script:
 
 ### Pipeline order (no leakage)
 
-1. **Layer search** – Linear probe on each candidate layer; writes `outputs/best_layer.json`.
-2. **Extract** – Extract activations at the best layer for ID (and optionally OOD) data. Splits are by **document** (or by file); train/val/test are disjoint.
-3. **ActFormer pretrain** – Next-step activation prediction on ID activations (optional subsequence sampling).
-4. **Probe comparison** – Train each probe type (e.g. raw_linear, actformer_linear) on ID; evaluate on ID test and each OOD set; save `comparison_metrics.json` and table.
+1. **Layer search** – Uses the **probe dataset** (config `data`). Linear probe on each candidate layer; writes `outputs/best_layer.json`.
+2. **Extract** – Extract activations at the best layer for ID (and optionally OOD) data. Splits are by **document** (or by file); train/val/test are disjoint. When using a **separate pretrain dataset**, set `pretrain.data` and `pretrain.memmap_dir` in config, then run extraction with `--for_pretrain` and the best layer (see `scripts/run_extract.sh`); or use ActFormer train’s `--run_extraction` to run it before pretraining.
+3. **ActFormer pretrain** – Self-supervised next-step (or MLM) activation prediction. If `pretrain.memmap_dir` is set, reads from that path at best layer (extraction for the pretrain dataset at best layer must exist); otherwise uses `extraction.memmap_dir`. Optional subsequence sampling.
+4. **Probe comparison** – **Fine-tune** the pretrained ActFormer (with a classification head) on ID, and train **raw** baselines (linear, MLP) from scratch on pooled activations; evaluate all on ID test and each OOD set; save `comparison_metrics.json` and table. Probe types: `raw_linear`, `raw_mlp`, `actformer_finetuned`.
 
 ### Artifacts
 
@@ -73,6 +73,10 @@ PYTHONPATH=. python scripts/diagnose_mps.py
 ```
 
 It will print PyTorch version, platform (arm64 vs x86_64), and whether MPS is built and available. Ensure PyTorch is installed for Mac ARM (e.g. `pip install torch` from a native arm64 shell) and macOS is 12.3+.
+
+### Weights & Biases
+
+To log pretraining and probe training runs to [Weights & Biases](https://wandb.ai), set `WANDB_API_KEY=<your_key>` in a `.env` file at the repo root. Runs are then logged automatically; if the key is missing, training runs as usual without W&B.
 
 ### Switching the base model
 

@@ -74,6 +74,9 @@ def rewrite_config_for_run_dir(
     # pretrain.output_dir -> run_dir/actformer
     if "pretrain" in out and "output_dir" in out["pretrain"]:
         out["pretrain"]["output_dir"] = str(run_dir / "actformer")
+    # pretrain.memmap_dir -> run_dir/activations_pretrain (when set)
+    if "pretrain" in out and out["pretrain"].get("memmap_dir"):
+        out["pretrain"]["memmap_dir"] = str(run_dir / "activations_pretrain")
 
     # comparison.activations.id.memmap_dir -> run_dir/activations
     comp = out.get("comparison", {}).get("activations", {})
