@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.actformer.model import ActFormer, load_actformer_with_head
 from src.probe.data import DocLevelProbeDataset, collate_doc_level_probe
@@ -171,7 +172,7 @@ def train_actformer_finetuned(
         model.train()
         train_loss_sum = 0.0
         n_batches = 0
-        for xb, mask, yb in train_loader:
+        for xb, mask, yb in tqdm(train_loader, desc=f"Epoch {epoch}", leave=True):
             xb, mask, yb = xb.to(device), mask.to(device), yb.to(device)
             opt.zero_grad()
             logits = model(xb, mask=mask)
@@ -210,20 +211,20 @@ def train_actformer_finetuned(
         max_len=max_len,
     )
     model.eval()
-    def eval_split(ds):
+    def eval_split(ds, desc="Eval"):
         if len(ds) == 0:
             return np.array([]), np.array([]), np.array([])
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_doc_level_probe, num_workers=0)
         preds, probs, labels = [], [], []
         with torch.no_grad():
-            for xb, mask, yb in loader:
+            for xb, mask, yb in tqdm(loader, desc=desc, leave=False):
                 xb, mask = xb.to(device), mask.to(device)
                 logits = model(xb, mask=mask)
                 preds.append(logits.argmax(dim=1).cpu().numpy())
                 probs.append(torch.softmax(logits, dim=1).cpu().numpy())
                 labels.append(yb.numpy())
         return np.concatenate(preds), np.vstack(probs), np.concatenate(labels)
-    y_pred_test, y_prob_test, y_test = eval_split(test_ds)
+    y_pred_test, y_prob_test, y_test = eval_split(test_ds, desc="Test")
     if len(y_test) == 0:
         metrics = {"accuracy": float("nan"), "macro_f1": float("nan"), "auroc": float("nan")}
     else:
@@ -231,7 +232,7 @@ def train_actformer_finetuned(
     try:
         import wandb
         if wandb.run is not None:
-            y_pred_val, y_prob_val, y_val = eval_split(val_ds)
+            y_pred_val, y_prob_val, y_val = eval_split(val_ds, desc="Val")
             if len(y_val) > 0:
                 val_metrics = compute_metrics(y_val, y_pred_val, y_prob_val, ["accuracy", "macro_f1", "auroc"])
                 wandb.log({"val/accuracy": val_metrics["accuracy"], "val/macro_f1": val_metrics["macro_f1"], "val/auroc": val_metrics["auroc"]})
@@ -339,7 +340,7 @@ def main() -> None:
     for epoch in range(epochs):
         probe.train()
         perm = torch.randperm(len(X_train_t), device=X_train_t.device)
-        for i in range(0, len(X_train_t), batch_size):
+        for i in tqdm(range(0, len(X_train_t), batch_size), desc=f"Epoch {epoch}", leave=True):
             idx = perm[i : i + batch_size]
             xb = X_train_t[idx].to(device)
             yb = torch.from_numpy(np.atleast_1d(y_train[idx.cpu().numpy()])).long().to(device)

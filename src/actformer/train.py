@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.actformer.data import ActivationSequenceDataset, collate_activation_sequences, make_mlm_collator
 from src.actformer.model import ActFormer
@@ -187,7 +188,7 @@ def main() -> None:
         model.train()
         train_loss_sum = 0.0
         train_n = 0
-        for batch in train_loader:
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}", leave=True):
             if objective == "mlm":
                 xb, padding_mask, mlm_mask = batch
                 xb, padding_mask, mlm_mask = xb.to(device), padding_mask.to(device), mlm_mask.to(device)
@@ -223,7 +224,7 @@ def main() -> None:
         val_loss = 0.0
         n_val = 0
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in tqdm(val_loader, desc="Val", leave=False):
                 if objective == "mlm":
                     xb, padding_mask, mlm_mask = batch
                     xb, padding_mask, mlm_mask = xb.to(device), padding_mask.to(device), mlm_mask.to(device)
