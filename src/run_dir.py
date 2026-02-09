@@ -223,6 +223,45 @@ def get_run_dir_from_config_path(config_path: str | Path) -> Path | None:
     return None
 
 
+def is_under_run_dir(path: str | Path) -> bool:
+    """Return True if any ancestor of path is a directory named run_* whose parent is outputs."""
+    p = Path(path).resolve()
+    for parent in p.parents:
+        if parent.name.startswith("run_") and parent.parent.name == "outputs":
+            return True
+    return False
+
+
+def ensure_unique_output_dir(output_dir: str | Path) -> Path:
+    """
+    Resolve output_dir. If already under a run dir (outputs/run_*), return path and ensure it exists.
+    Otherwise create output_dir/run_<timestamp>, ensure it exists, and return it.
+    """
+    path = Path(output_dir).resolve()
+    if is_under_run_dir(path):
+        ensure_dir(path)
+        return path
+    unique = path / f"run_{_timestamp()}"
+    ensure_dir(unique)
+    return unique
+
+
+def resolve_actformer_checkpoint_dir(base_dir: str | Path) -> Path:
+    """
+    If base_dir/best.pt exists, return base_dir. Else list subdirs matching run_*, sort by name
+    (timestamp order), take the last one that contains best.pt; if found return that subdir,
+    else return base_dir.
+    """
+    base = Path(base_dir).resolve()
+    if (base / "best.pt").exists():
+        return base
+    run_subdirs = sorted([d for d in base.iterdir() if d.is_dir() and d.name.startswith("run_")])
+    for subdir in reversed(run_subdirs):
+        if (subdir / "best.pt").exists():
+            return subdir
+    return base
+
+
 def run_ood_extraction(
     run_dir: Path,
     best_layer_index: int,

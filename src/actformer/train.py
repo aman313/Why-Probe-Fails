@@ -11,8 +11,9 @@ from tqdm import tqdm
 
 from src.actformer.data import ActivationSequenceDataset, collate_activation_sequences, make_mlm_collator
 from src.actformer.model import ActFormer
+from src.run_dir import ensure_unique_output_dir
 from src.utils.device import get_device
-from src.utils.io import ensure_dir, load_json, load_yaml
+from src.utils.io import load_json, load_yaml
 from src.utils.seed import set_seed
 from src.utils.wandb_utils import init_wandb, load_dotenv_for_wandb
 
@@ -67,7 +68,7 @@ def main() -> None:
     else:
         memmap_dir = Path(ext_cfg.get("memmap_dir", "outputs/activations"))
     out_dir = Path(train_cfg.get("output_dir", "outputs/actformer"))
-    ensure_dir(out_dir)
+    out_dir = ensure_unique_output_dir(out_dir)
     layer_index = model_cfg.get("layer_index", 0)
     best_path = Path(config.get("layer_search", {}).get("layer_search_output", "outputs/best_layer.json"))
     if best_path.exists():

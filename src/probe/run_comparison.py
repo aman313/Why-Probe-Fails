@@ -18,6 +18,7 @@ from src.probe.train_probe import (
 from src.probe.data import DocLevelProbeDataset, collate_doc_level_probe
 from src.probe.model import build_probe
 from src.actformer.model import load_actformer_with_head
+from src.run_dir import ensure_unique_output_dir, resolve_actformer_checkpoint_dir
 from src.utils.device import get_device
 from src.utils.io import load_json, load_yaml, save_json
 from src.utils.metrics import compute_metrics
@@ -69,11 +70,15 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
     id_cfg = activations.get("id", {})
     ood_list = activations.get("ood", [])
     probe_types = comp.get("probe_types", ["raw_linear", "actformer_finetuned"])
-    actformer_ckpt = Path(comp.get("actformer_checkpoint", "outputs/actformer/best.pt"))
+    ckpt_path_from_config = Path(comp.get("actformer_checkpoint", "outputs/actformer/best.pt"))
+    base_dir = ckpt_path_from_config.parent
+    ckpt_dir = resolve_actformer_checkpoint_dir(base_dir)
+    actformer_ckpt = ckpt_dir / "best.pt"
     pooling = comp.get("pooling", "mean")
     probe_train = comp.get("probe_train", {})
     metrics_list = comp.get("metrics", ["accuracy", "macro_f1", "auroc"])
     out_dir = Path(comp.get("output_dir", "outputs/probe_comparison"))
+    out_dir = ensure_unique_output_dir(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     id_memmap = Path(id_cfg.get("memmap_dir", "outputs/activations/id"))

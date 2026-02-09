@@ -16,6 +16,7 @@ from tqdm import tqdm
 from src.actformer.model import ActFormer, load_actformer_with_head
 from src.probe.data import DocLevelProbeDataset, collate_doc_level_probe
 from src.probe.model import build_probe
+from src.run_dir import ensure_unique_output_dir, resolve_actformer_checkpoint_dir
 from src.utils.device import get_device
 from src.utils.dtypes import resolve_numpy_dtype
 from src.utils.io import load_json, load_yaml, save_json
@@ -271,6 +272,7 @@ def main() -> None:
     label_map = config.get("data", {}).get("label_map", {})
     n_classes = len(set(label_map.values())) if label_map else 2
     out_dir = Path(config.get("comparison", {}).get("output_dir", "outputs/probe_comparison"))
+    out_dir = ensure_unique_output_dir(out_dir)
 
     load_dotenv_for_wandb(config)
     wandb_cfg = config.get("wandb", {})
@@ -289,7 +291,9 @@ def main() -> None:
     )
 
     if probe_type == "actformer_finetuned":
-        actformer_ckpt = Path(config.get("pretrain", {}).get("output_dir", "outputs/actformer")) / "best.pt"
+        pretrain_out = Path(config.get("pretrain", {}).get("output_dir", "outputs/actformer"))
+        ckpt_dir = resolve_actformer_checkpoint_dir(pretrain_out)
+        actformer_ckpt = ckpt_dir / "best.pt"
         if not actformer_ckpt.exists():
             actformer_ckpt = Path(config.get("pretrain", {}).get("output_dir", "outputs/actformer_tiny")) / "best.pt"
         if not actformer_ckpt.exists():
