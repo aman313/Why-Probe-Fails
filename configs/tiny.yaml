@@ -63,4 +63,5 @@ comparison:
     batch_size: 4
     freeze_body: false
     pooling: mean
+    use_lora: false
   output_dir: outputs/probe_comparison_tiny

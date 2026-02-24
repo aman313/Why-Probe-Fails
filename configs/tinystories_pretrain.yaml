@@ -109,6 +109,10 @@ comparison:
     pooling: mean
     l2: 0.01
     grad_clip: 1.0
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.05
   pooling: mean
   probe_train:
     lr: 1e-3

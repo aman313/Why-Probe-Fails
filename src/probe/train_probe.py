@@ -140,6 +140,7 @@ def train_actformer_finetuned(
         print("[probe] No train data for actformer_finetuned. Exiting.")
         return {"accuracy": float("nan"), "macro_f1": float("nan"), "auroc": float("nan")}
     device = get_device()
+    use_lora = bool(finetune_cfg.get("use_lora", False))
     model = load_actformer_with_head(
         checkpoint_path=str(actformer_ckpt),
         d_in=d_in,
@@ -153,6 +154,11 @@ def train_actformer_finetuned(
         causal=af_cfg.get("causal", True),
         pool=finetune_cfg.get("pooling", "mean"),
         freeze_body=finetune_cfg.get("freeze_body", False),
+        use_lora=use_lora,
+        lora_r=int(finetune_cfg.get("lora_r", 8)),
+        lora_alpha=int(finetune_cfg.get("lora_alpha", 16)),
+        lora_dropout=float(finetune_cfg.get("lora_dropout", 0.05)),
+        lora_target_modules=finetune_cfg.get("lora_target_modules"),
     )
     model = model.to(device)
     opt = torch.optim.AdamW(
@@ -190,6 +196,8 @@ def train_actformer_finetuned(
                 wandb.log({"train_loss": mean_loss}, step=epoch)
         except Exception:
             pass
+    if use_lora:
+        model.actformer = model.actformer.merge_and_unload()
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"model": model.state_dict(), "actformer_checkpoint": str(actformer_ckpt)}, out_dir / "actformer_probe.pt")
     # Evaluate on val and test

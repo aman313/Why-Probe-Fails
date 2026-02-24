@@ -1,12 +1,18 @@
 """
 ActFormer: small causal transformer that predicts next-step activation from previous activations.
 Output head: MSE or Gaussian NLL. Exposes last_hidden_state for probing.
+Supports LoRA for parameter-efficient fine-tuning via load_actformer_with_head(..., use_lora=True).
 """
 import math
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from peft import PeftModel
+
+DEFAULT_LORA_TARGET_MODULES = ["input_proj", "out_proj", "linear1", "linear2"]
 
 
 class ActFormer(nn.Module):
@@ -61,14 +67,24 @@ class ActFormer(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: torch.Tensor | None = None,
         mask: torch.Tensor | None = None,
         mlm_mask: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs: object,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
         x: (B, T, d_in). mask: (B, T) True = valid. mlm_mask: (B, T) True = masked for MLM.
         Returns: mu (B, T, d_in), log_sigma (B, T, d_in) or None, last_hidden_state (B, T, d_model).
+        Accepts input_ids/attention_mask for PEFT compatibility (maps to x/mask).
         """
+        if x is None and input_ids is not None:
+            x = input_ids
+        if mask is None and attention_mask is not None:
+            mask = attention_mask.bool()
+        assert x is not None, "Provide x or input_ids"
         B, T, _ = x.shape
         if mlm_mask is not None:
             x = x.clone()
@@ -161,6 +177,29 @@ class ActFormerWithHead(nn.Module):
         return self.head(pooled)
 
 
+def apply_lora_to_actformer(
+    actformer: ActFormer,
+    r: int = 8,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+    target_modules: list[str] | None = None,
+) -> "PeftModel":
+    """Wrap ActFormer with PEFT LoRA adapters. Base params are frozen; only LoRA + head are trainable when used in ActFormerWithHead."""
+    from peft import LoraConfig, get_peft_model, TaskType
+
+    if target_modules is None:
+        target_modules = list(DEFAULT_LORA_TARGET_MODULES)
+    config = LoraConfig(
+        r=r,
+        lora_alpha=lora_alpha,
+        target_modules=target_modules,
+        lora_dropout=lora_dropout,
+        bias="none",
+        task_type=TaskType.FEATURE_EXTRACTION,
+    )
+    return get_peft_model(actformer, config)
+
+
 def load_actformer_with_head(
     checkpoint_path: str | None,
     d_in: int,
@@ -174,8 +213,16 @@ def load_actformer_with_head(
     causal: bool = True,
     pool: Literal["mean", "last"] = "mean",
     freeze_body: bool = False,
+    *,
+    use_lora: bool = False,
+    lora_r: int = 8,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+    lora_target_modules: list[str] | None = None,
 ) -> ActFormerWithHead:
-    """Build ActFormerWithHead; load pretrained ActFormer weights from checkpoint if path given."""
+    """Build ActFormerWithHead; load pretrained ActFormer weights from checkpoint if path given.
+    When use_lora=True, wrap the ActFormer body with LoRA (base frozen, adapter + head trainable).
+    """
     actformer = ActFormer(
         d_in=d_in,
         d_model=d_model,
@@ -190,4 +237,13 @@ def load_actformer_with_head(
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         state = ckpt.get("model", ckpt)
         actformer.load_state_dict(state, strict=True)
+    if use_lora:
+        actformer = apply_lora_to_actformer(
+            actformer,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            target_modules=lora_target_modules,
+        )
+        freeze_body = False
     return ActFormerWithHead(actformer, n_classes=n_classes, pool=pool, freeze_body=freeze_body)

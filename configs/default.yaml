@@ -118,6 +118,12 @@ comparison:
     pooling: mean
     l2: 0.01
     grad_clip: 1.0
+    # LoRA (use_lora: true to train adapter + head only; merged into checkpoint at save)
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.05
+    # lora_target_modules: [input_proj, out_proj, linear1, linear2]  # default in code
   pooling: mean
   probe_train:
     lr: 1e-3
