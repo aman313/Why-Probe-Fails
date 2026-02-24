@@ -107,23 +107,23 @@ comparison:
     id:
       memmap_dir: outputs/activations/id
       index_path: outputs/activations/id/index.json
-    ood: []
-  actformer_checkpoint: outputs/actformer/best.pt
+    ood: 
+      - name: dolly
+        memmap_dir: outputs/activations_ood/dolly/layer_3
+      - name: harmbench
+        memmap_dir: outputs/activations_ood/harmbench/layer_3
+      - name: advbench
+        memmap_dir: outputs/activations_ood/advbench/layer_3
+  actformer_checkpoint: /home/ubuntu/Why-Probe-Fails/outputs/actformer/run_20260210_021105/best.pt
   probe_types: [raw_linear, raw_mlp, actformer_finetuned]
   actformer_finetune:
     lr: 1e-4
-    epochs: 10
+    epochs: 1
     batch_size: 16
-    freeze_body: false
+    freeze_body: true
     pooling: mean
     l2: 0.01
     grad_clip: 1.0
-    # LoRA (use_lora: true to train adapter + head only; merged into checkpoint at save)
-    use_lora: false
-    lora_r: 8
-    lora_alpha: 16
-    lora_dropout: 0.05
-    # lora_target_modules: [input_proj, out_proj, linear1, linear2]  # default in code
   pooling: mean
   probe_train:
     lr: 1e-3

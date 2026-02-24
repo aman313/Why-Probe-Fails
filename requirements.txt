@@ -10,3 +10,4 @@ wandb>=0.15.0
 python-dotenv>=1.0.0
 datasets>=2.14.0
 peft>=0.10.0
+accelerate
