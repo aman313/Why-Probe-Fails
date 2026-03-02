@@ -1,6 +1,6 @@
 """Load CSVs from data_dir by category; build doc table and train/val/test splits."""
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import pandas as pd
@@ -57,6 +57,107 @@ def load_docs_from_data_dir(
                 if limit_docs is not None and len(rows) >= limit_docs:
                     return pd.DataFrame(rows)
     return pd.DataFrame(rows)
+
+
+def load_docs_metadata(
+    data_dir: str | Path,
+    categories: list[str],
+    label_map: dict[str, int],
+    limit_docs: int | None = None,
+) -> pd.DataFrame:
+    """
+    Same iteration as load_docs_from_data_dir but only store doc_id, label, source_file (no text).
+    Returns DataFrame with columns: doc_id, label, source_file. Stays small in memory.
+    """
+    data_dir = Path(data_dir)
+    rows: list[dict[str, Any]] = []
+    doc_id = 0
+    for category in categories:
+        label = label_map.get(category, -1)
+        cat_dir = data_dir / category
+        if not cat_dir.exists():
+            continue
+        for csv_path in sorted(cat_dir.glob("*.csv")):
+            df = pd.read_csv(csv_path)
+            if "prompt" not in df.columns:
+                continue
+            source_file = f"{category}/{csv_path.name}"
+            for _, row in df.iterrows():
+                text = row["prompt"]
+                if pd.isna(text) or str(text).strip() == "":
+                    continue
+                rows.append(
+                    {
+                        "doc_id": doc_id,
+                        "label": label,
+                        "source_file": source_file,
+                    }
+                )
+                doc_id += 1
+                if limit_docs is not None and len(rows) >= limit_docs:
+                    return pd.DataFrame(rows)
+    return pd.DataFrame(rows)
+
+
+def iter_docs(
+    data_dir: str | Path,
+    categories: list[str],
+    label_map: dict[str, int],
+    doc_id_to_split: dict[int, str],
+    limit_docs: int | None = None,
+    start_doc_index: int = 0,
+    split: str = "all",
+) -> Iterator[tuple[int, int, str, int, str]]:
+    """
+    Yield (doc_index, doc_id, text, label, split_name) in the same order as load_docs_from_data_dir.
+    doc_id_to_split: map doc_id -> "train" | "val" | "test" (from split_docs of metadata).
+    start_doc_index: skip the first start_doc_index docs in the yielded stream (for resume).
+    split: if not "all", only yield docs in that split; doc_index is 0-based in the yielded stream.
+    """
+    data_dir = Path(data_dir)
+    stream_index = 0  # index among docs we yield (0, 1, 2, ...)
+    doc_id = 0
+    for category in categories:
+        label = label_map.get(category, -1)
+        cat_dir = data_dir / category
+        if not cat_dir.exists():
+            continue
+        for csv_path in sorted(cat_dir.glob("*.csv")):
+            df = pd.read_csv(csv_path)
+            if "prompt" not in df.columns:
+                continue
+            for _, row in df.iterrows():
+                text = row["prompt"]
+                if pd.isna(text) or str(text).strip() == "":
+                    continue
+                split_name = doc_id_to_split.get(doc_id, "train")
+                if split != "all" and split_name != split:
+                    doc_id += 1
+                    if limit_docs is not None and doc_id >= limit_docs:
+                        return
+                    continue
+                if stream_index >= start_doc_index:
+                    yield (stream_index, doc_id, str(text).strip(), label, split_name)
+                stream_index += 1
+                doc_id += 1
+                if limit_docs is not None and doc_id >= limit_docs:
+                    return
+
+
+def build_doc_id_to_split(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> dict[int, str]:
+    """Build doc_id -> 'train'|'val'|'test' from split dataframes."""
+    out: dict[int, str] = {}
+    for doc_id in train_df["doc_id"]:
+        out[int(doc_id)] = "train"
+    for doc_id in val_df["doc_id"]:
+        out[int(doc_id)] = "val"
+    for doc_id in test_df["doc_id"]:
+        out[int(doc_id)] = "test"
+    return out
 
 
 def split_docs(

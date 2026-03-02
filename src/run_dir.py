@@ -232,10 +232,11 @@ def is_under_run_dir(path: str | Path) -> bool:
     return False
 
 
-def ensure_unique_output_dir(output_dir: str | Path) -> Path:
+def ensure_unique_output_dir(output_dir: str | Path, config: dict[str, Any] | None = None) -> Path:
     """
     Resolve output_dir. If already under a run dir (outputs/run_*), return path and ensure it exists.
     Otherwise create output_dir/run_<timestamp>, ensure it exists, and return it.
+    When a new run_<timestamp> subdir is created and config is provided, write config.yaml into it.
     """
     path = Path(output_dir).resolve()
     if is_under_run_dir(path):
@@ -243,6 +244,8 @@ def ensure_unique_output_dir(output_dir: str | Path) -> Path:
         return path
     unique = path / f"run_{_timestamp()}"
     ensure_dir(unique)
+    if config is not None:
+        save_yaml(config, unique / "config.yaml")
     return unique
 
 

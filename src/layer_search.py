@@ -15,6 +15,7 @@ from src.extract_activations import extract_activations
 from src.utils.dtypes import resolve_numpy_dtype
 from src.utils.io import ensure_dir, load_json, load_yaml, save_json
 from src.utils.seed import set_seed
+from transformers import AutoConfig
 
 
 def load_pooled_features_per_doc(
@@ -113,11 +114,17 @@ def main() -> None:
     ls_cfg = config.get("layer_search", {})
     model_cfg = config.get("model", {})
     memmap_dir = Path(ext_cfg.get("memmap_dir", "outputs/activations"))
-    layers = ls_cfg.get("layer_search_layers", [0, 1, 2, 3, 4, 5])
+    # get number of layers in the model
+    hf_config = AutoConfig.from_pretrained(model_cfg.get("base_model_name"), trust_remote_code=True)
+    num_layers = hf_config.num_hidden_layers
+    default_layers = list(range(num_layers // 2 - 2, num_layers // 2 + 2))
+    # use mid 5 layers as default
+    layers = ls_cfg.get("layer_search_layers", default_layers)
     metric = ls_cfg.get("layer_search_metric", "macro_f1")
     out_path = Path(ls_cfg.get("layer_search_output", "outputs/best_layer.json"))
 
     scores: dict[int, float] = {}
+    print(f"[layer_search] Running layer search for {len(layers)} layers for model {model_cfg.get('base_model_name')}")
     for layer_idx in layers:
         layer_dir = memmap_dir / f"layer_{layer_idx}"
         if args.run_extraction and (not layer_dir.exists() or not (layer_dir / "index.json").exists()):

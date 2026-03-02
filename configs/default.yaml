@@ -17,7 +17,7 @@ data:
 # Base LM (whose activations we extract). Switch by changing base_model_name (e.g. gpt2, distilgpt2, meta-llama/Llama-3.1-8B-Instruct).
 # cache_dir: use a path inside the repo (e.g. .cache/huggingface) if ~/.cache has permission issues.
 model:
-  base_model_name: distilgpt2
+  base_model_name: Qwen/Qwen2.5-3B-Instruct
   cache_dir: .cache/huggingface
   layer_index: 3
   tap_point: resid_post  # resid_post | resid_pre | mlp_out
@@ -26,21 +26,20 @@ model:
 extraction:
   max_seq_len: 256
   stride: 128
-  batch_size_extract: 8
+  chunk_size: 10  # max sequence chunks to hold in memory before processing
+  batch_size: 5    # GPU batch size for model forward (activations written per batch)
   activation_dtype: float32
   memmap_dir: outputs/activations
-  limit_docs: null
-  chunk_docs: null  # set to int (e.g. 50000) for chunked extraction on large datasets
+  limit_docs: 100000 #null
 
 # Layer search: which layers to try, metric to pick best
 layer_search:
-  layer_search_layers: [0, 1, 2, 3, 4, 5]
   layer_search_metric: macro_f1
   layer_search_output: outputs/best_layer.json
 
 # ActFormer
 actformer:
-  d_model: 256
+  d_model: 1024
   n_layers: 4
   n_heads: 4
   dropout: 0.1
@@ -69,10 +68,10 @@ pretrain:
     test_ratio: 0.005
     split_by_file: false
     limit_docs: null
-  lr: 1e-4
+  lr: 1e-3
   wd: 0.01
-  epochs: 500
-  batch_size: 512
+  epochs: 5
+  batch_size: 128
   grad_clip: 1.0
   warmup_steps: 100
   eval_every: 200
@@ -107,7 +106,14 @@ comparison:
     id:
       memmap_dir: outputs/activations/id
       index_path: outputs/activations/id/index.json
-    ood: []
+    ood:
+      - name: dolly
+        memmap_dir: outputs/activations_ood/dolly/layer_3
+      - name: harmbench
+        memmap_dir: outputs/activations_ood/harmbench/layer_3
+      - name: advbench
+        memmap_dir: outputs/activations_ood/advbench/layer_3     
+    
   actformer_checkpoint: outputs/actformer/best.pt
   probe_types: [raw_linear, raw_mlp, actformer_finetuned]
   actformer_finetune:
@@ -132,6 +138,19 @@ comparison:
     l2: 0.01
   metrics: [accuracy, macro_f1, auroc]
   output_dir: outputs/probe_comparison
+
+
+# Token-level eval: compare baseline LM vs ActFormer-replaced early layers
+token_eval:
+  split: test
+  max_docs: 200
+  max_seq_len: 256
+  batch_size: 4
+  topk_values: [5, 10]
+  save_examples: 200
+  output_dir: outputs/actformer_token_eval
+  normalization_memmap_dir: null
+  actformer_checkpoint: null
 
 # Weights & Biases (optional). Set WANDB_API_KEY in .env at repo root to enable.
 wandb:

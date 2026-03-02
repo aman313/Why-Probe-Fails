@@ -68,7 +68,7 @@ def main() -> None:
     else:
         memmap_dir = Path(ext_cfg.get("memmap_dir", "outputs/activations"))
     out_dir = Path(train_cfg.get("output_dir", "outputs/actformer"))
-    out_dir = ensure_unique_output_dir(out_dir)
+    out_dir = ensure_unique_output_dir(out_dir, config=config)
     layer_index = model_cfg.get("layer_index", 0)
     best_path = Path(config.get("layer_search", {}).get("layer_search_output", "outputs/best_layer.json"))
     if best_path.exists():

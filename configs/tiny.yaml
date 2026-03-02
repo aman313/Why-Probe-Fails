@@ -18,6 +18,8 @@ extraction:
   max_seq_len: 64
   stride: 32
   batch_size_extract: 4
+  chunk_size: 1000
+  batch_size: 4
   activation_dtype: float32
   memmap_dir: outputs/activations_tiny
   limit_docs: 2

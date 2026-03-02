@@ -18,6 +18,12 @@ print(load_json(p)['layer_index'])
 python -m src.extract_activations --config "$CONFIG" --split all --layer_index "$LAYER"
 echo "[pipeline] Step 3: Pretrain ActFormer"
 python -m src.actformer.train --config "$CONFIG"
-echo "[pipeline] Step 4: Probe comparison"
+echo "[pipeline] Step 4: Token-level replacement eval (RUN_TOKEN_EVAL=${RUN_TOKEN_EVAL:-1})"
+if [ "${RUN_TOKEN_EVAL:-1}" = "1" ]; then
+  python -m src.actformer.token_eval --config "$CONFIG"
+else
+  echo "[pipeline] Skipping token eval (set RUN_TOKEN_EVAL=1 to enable)"
+fi
+echo "[pipeline] Step 5: Probe comparison"
 python -m src.probe.run_comparison --config "$CONFIG"
 echo "[pipeline] Done."

@@ -78,7 +78,7 @@ def run_probe_comparison(config: dict[str, Any]) -> dict[str, Any]:
     probe_train = comp.get("probe_train", {})
     metrics_list = comp.get("metrics", ["accuracy", "macro_f1", "auroc"])
     out_dir = Path(comp.get("output_dir", "outputs/probe_comparison"))
-    out_dir = ensure_unique_output_dir(out_dir)
+    out_dir = ensure_unique_output_dir(out_dir, config=config)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     id_memmap = Path(id_cfg.get("memmap_dir", "outputs/activations/id"))

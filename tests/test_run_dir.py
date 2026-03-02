@@ -10,6 +10,7 @@ from src.run_dir import (
     is_under_run_dir,
     resolve_actformer_checkpoint_dir,
 )
+from src.utils.io import load_yaml
 
 
 def test_ensure_unique_output_dir_creates_run_timestamp_subdir():
@@ -21,6 +22,28 @@ def test_ensure_unique_output_dir_creates_run_timestamp_subdir():
         assert result.parent.resolve() == base.resolve()
         assert re.match(r"run_\d{8}_\d{6}", result.name), f"Expected run_<timestamp>, got {result.name}"
         assert result.resolve() == (base / result.name).resolve()
+
+
+def test_ensure_unique_output_dir_writes_config_when_provided():
+    """When config is passed and a new run_<timestamp> is created, config.yaml is written with that config."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base = (Path(tmp) / "outputs" / "actformer").resolve()
+        config = {"seed": 42, "pretrain": {"lr": 1e-4}}
+        result = ensure_unique_output_dir(base, config=config)
+        assert result.is_dir()
+        config_path = result / "config.yaml"
+        assert config_path.exists()
+        loaded = load_yaml(config_path)
+        assert loaded == config
+
+
+def test_ensure_unique_output_dir_no_config_file_when_config_none():
+    """When config is None, no config.yaml is created (backward compatibility)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base = (Path(tmp) / "outputs" / "actformer").resolve()
+        result = ensure_unique_output_dir(base, config=None)
+        assert result.is_dir()
+        assert not (result / "config.yaml").exists()
 
 
 def test_ensure_unique_output_dir_under_run_dir_unchanged():

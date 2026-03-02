@@ -280,7 +280,7 @@ def main() -> None:
     label_map = config.get("data", {}).get("label_map", {})
     n_classes = len(set(label_map.values())) if label_map else 2
     out_dir = Path(config.get("comparison", {}).get("output_dir", "outputs/probe_comparison"))
-    out_dir = ensure_unique_output_dir(out_dir)
+    out_dir = ensure_unique_output_dir(out_dir, config=config)
 
     load_dotenv_for_wandb(config)
     wandb_cfg = config.get("wandb", {})
