@@ -120,6 +120,26 @@ def _load_normalization_stats(config: dict[str, Any], layer_index: int, hidden_s
     return mean, np.where(std < 1e-8, 1.0, std)
 
 
+def _infer_actformer_architecture(state_dict: dict[str, torch.Tensor]) -> dict[str, Any]:
+    """Infer ActFormer architecture from checkpoint state_dict (for checkpoints without actformer_config)."""
+    # input_proj: Linear(d_in, d_model) -> weight (d_model, d_in)
+    w = state_dict["input_proj.weight"]
+    d_model = int(w.shape[0])
+    d_in = int(w.shape[1])
+    # transformer.layers.i.linear1: (d_model*ff_mult, d_model)
+    linear1 = state_dict["transformer.layers.0.linear1.weight"]
+    ff_mult = int(linear1.shape[0]) // d_model
+    # count layers: keys like transformer.layers.0.xxx, transformer.layers.1.xxx, ...
+    layer_keys = [k for k in state_dict if k.startswith("transformer.layers.")]
+    indices = set()
+    for k in layer_keys:
+        parts = k.split(".")
+        if len(parts) >= 3 and parts[2].isdigit():
+            indices.add(int(parts[2]))
+    n_layers = max(indices) + 1 if indices else 1
+    return {"d_in": d_in, "d_model": d_model, "n_layers": n_layers, "ff_mult": ff_mult}
+
+
 def _load_actformer(config: dict[str, Any], hidden_size: int, device: torch.device) -> tuple[ActFormer, Path]:
     eval_cfg = config.get("token_eval", {})
     af_cfg = config.get("actformer", {})
@@ -133,18 +153,50 @@ def _load_actformer(config: dict[str, Any], hidden_size: int, device: torch.devi
         ckpt_path = resolve_actformer_checkpoint_dir(ckpt_path) / "best.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"ActFormer checkpoint not found: {ckpt_path}")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    state_dict = state.get("model", state)
+
+    # Use saved actformer_config if present, else infer from state_dict so architecture matches checkpoint
+    if "actformer_config" in state:
+        cfg = state["actformer_config"]
+        d_in = int(cfg.get("d_in", hidden_size))
+        if d_in != hidden_size:
+            raise ValueError(
+                f"Checkpoint ActFormer d_in={d_in} does not match base model hidden_size={hidden_size}. "
+                "Use token_eval with the same base model the ActFormer was trained for."
+            )
+        d_model = int(cfg["d_model"])
+        n_layers = int(cfg["n_layers"])
+        n_heads = int(cfg["n_heads"])
+        ff_mult = int(cfg.get("ff_mult", 4))
+        loss_type = str(cfg.get("loss_type", "mse"))
+        causal = bool(cfg.get("causal", True))
+    else:
+        inferred = _infer_actformer_architecture(state_dict)
+        d_in = inferred["d_in"]
+        if d_in != hidden_size:
+            raise ValueError(
+                f"Checkpoint ActFormer d_in={d_in} does not match base model hidden_size={hidden_size}. "
+                "Use token_eval with the same base model the ActFormer was trained for."
+            )
+        d_model = inferred["d_model"]
+        n_layers = inferred["n_layers"]
+        ff_mult = inferred["ff_mult"]
+        n_heads = int(af_cfg.get("n_heads", 4))
+        loss_type = str(af_cfg.get("loss_type", "mse"))
+        causal = bool(af_cfg.get("causal", True))
+
     model = ActFormer(
         d_in=hidden_size,
-        d_model=af_cfg.get("d_model", 256),
-        n_layers=af_cfg.get("n_layers", 2),
-        n_heads=af_cfg.get("n_heads", 4),
-        ff_mult=af_cfg.get("ff_mult", 4),
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        ff_mult=ff_mult,
         dropout=0.0,
-        loss_type=af_cfg.get("loss_type", "mse"),
-        causal=af_cfg.get("causal", True),
+        loss_type=loss_type,
+        causal=causal,
     ).to(device)
-    state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    model.load_state_dict(state.get("model", state), strict=True)
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
     return model, ckpt_path
 
@@ -260,6 +312,10 @@ def evaluate_token_replacement(config: dict[str, Any]) -> dict[str, Any]:
     batch_size = int(eval_cfg.get("batch_size", 4))
     topk_values = sorted({int(k) for k in eval_cfg.get("topk_values", [5, 10]) if int(k) > 0})
     save_examples = int(eval_cfg.get("save_examples", 200))
+    save_correct_examples = int(eval_cfg.get("save_correct_examples", 0))
+    save_correct_per_position = eval_cfg.get("save_correct_examples_per_position")
+    if save_correct_per_position is not None:
+        save_correct_per_position = int(save_correct_per_position)
     output_dir = ensure_dir(Path(eval_cfg.get("output_dir", "outputs/actformer_token_eval")))
 
     docs = _load_eval_docs(config, split=split, max_docs=max_docs)
@@ -313,6 +369,8 @@ def evaluate_token_replacement(config: dict[str, Any]) -> dict[str, Any]:
         "jaccard_sum": {k: 0.0 for k in topk_values},
         "jaccard_count": {k: 0 for k in topk_values},
         "errors": [],
+        "correct": [],
+        "correct_by_position": {},
         "pairs": Counter(),
     }
 
@@ -440,12 +498,48 @@ def evaluate_token_replacement(config: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
 
+            # Log correct predictions (baseline == replaced) when enabled.
+            if save_correct_examples > 0:
+                for b in range(matches.size(0)):
+                    if not matches[b].item():
+                        continue
+                    if len(s["correct"]) >= save_correct_examples:
+                        break
+                    per_pos = s["correct_by_position"].setdefault(pos_idx, [])
+                    if save_correct_per_position is not None and len(per_pos) >= save_correct_per_position:
+                        continue
+                    token_id = int(next_base[b].item())
+                    ctx_left = max(0, step - 5)
+                    ctx_right = step
+                    ctx_ids = prefix_base[b, ctx_left:ctx_right]
+                    ex = {
+                        "replacement_depth": depth,
+                        "doc_id": int(batch_docs[b]["doc_id"]),
+                        "position": pos_idx,
+                        "gold_token_id": token_id,
+                        "baseline_token_id": token_id,
+                        "replaced_token_id": token_id,
+                        "gold_token": _safe_decode(tokenizer, token_id),
+                        "baseline_token": _safe_decode(tokenizer, token_id),
+                        "replaced_token": _safe_decode(tokenizer, token_id),
+                        "topk_jaccard_similarity": float(jac_step[b].item()),
+                        "baseline_topk_tokens": [_safe_decode(tokenizer, x) for x in topk_base[b, 0].tolist()],
+                        "replaced_topk_tokens": [_safe_decode(tokenizer, x) for x in topk_rep[b, 0].tolist()],
+                        "context_window": tokenizer.decode(
+                            ctx_ids.tolist(),
+                            clean_up_tokenization_spaces=False,
+                        ),
+                    }
+                    s["correct"].append(ex)
+                    per_pos.append(ex)
+
             prefix_base = torch.cat([prefix_base, next_base.unsqueeze(1)], dim=1)
             prefix_rep = torch.cat([prefix_rep, next_rep.unsqueeze(1)], dim=1)
 
     summary_depths: dict[str, Any] = {}
     position_depths: dict[str, Any] = {}
     all_errors: list[dict[str, Any]] = []
+    all_correct: list[dict[str, Any]] = []
     examples = ["# ActFormer Token Evaluation Examples", ""]
 
     for depth in depths:
@@ -478,19 +572,31 @@ def evaluate_token_replacement(config: dict[str, Any]) -> dict[str, Any]:
         position_depths[str(depth)] = pos_curve
 
         all_errors.extend(s["errors"])
+        all_correct.extend(s["correct"])
         examples.append(f"## Replacement Depth {depth}")
         if not s["errors"]:
             examples.append("- No mismatches captured.")
-            examples.append("")
-            continue
-        for ex in s["errors"][: min(20, len(s["errors"]))]:
-            examples.append(
-                f"- doc_id={ex['doc_id']} pos={ex['position']} "
-                f"gold={ex['gold_token']!r} baseline={ex['baseline_token']!r} "
-                f"replaced={ex['replaced_token']!r} jaccard={ex['topk_jaccard_similarity']:.3f}"
-            )
-            examples.append(f"  - context: {ex['context_window']!r}")
+        else:
+            for ex in s["errors"][: min(20, len(s["errors"]))]:
+                examples.append(
+                    f"- doc_id={ex['doc_id']} pos={ex['position']} "
+                    f"gold={ex['gold_token']!r} baseline={ex['baseline_token']!r} "
+                    f"replaced={ex['replaced_token']!r} jaccard={ex['topk_jaccard_similarity']:.3f}"
+                )
+                examples.append(f"  - context: {ex['context_window']!r}")
         examples.append("")
+        if save_correct_examples > 0 and s["correct"]:
+            examples.append("### Correct prediction examples (by position)")
+            by_pos = s["correct_by_position"]
+            for pos_idx in sorted(by_pos.keys()):
+                exs = by_pos[pos_idx][:5]
+                examples.append(f"- Position {pos_idx}:")
+                for ex in exs:
+                    examples.append(
+                        f"  - doc_id={ex['doc_id']} token={ex['gold_token']!r} jaccard={ex['topk_jaccard_similarity']:.3f}"
+                    )
+                    examples.append(f"    context: {ex['context_window']!r}")
+            examples.append("")
 
     summary = {
         "base_model_name": base_model_name,
@@ -510,6 +616,10 @@ def evaluate_token_replacement(config: dict[str, Any]) -> dict[str, Any]:
     with open(output_dir / "errors.jsonl", "w") as f:
         for row in all_errors:
             f.write(json.dumps(row) + "\n")
+    if save_correct_examples > 0 and all_correct:
+        with open(output_dir / "correct.jsonl", "w") as f:
+            for row in all_correct:
+                f.write(json.dumps(row) + "\n")
     (output_dir / "examples.md").write_text("\n".join(examples) + "\n")
     return summary
 

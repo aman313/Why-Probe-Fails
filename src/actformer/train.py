@@ -248,10 +248,25 @@ def main() -> None:
                 wandb.log({"train_loss": mean_train_loss, "val_loss": val_loss}, step=step)
         except Exception:
             pass
+        actformer_config = {
+            "d_in": hidden_size,
+            "d_model": d_model,
+            "n_layers": n_layers,
+            "n_heads": n_heads,
+            "ff_mult": ff_mult,
+            "loss_type": loss_type,
+            "causal": causal,
+        }
         if val_loss < best_val:
             best_val = val_loss
-            torch.save({"model": model.state_dict(), "step": step}, out_dir / "best.pt")
-        torch.save({"model": model.state_dict(), "step": step}, out_dir / "last.pt")
+            torch.save(
+                {"model": model.state_dict(), "step": step, "actformer_config": actformer_config},
+                out_dir / "best.pt",
+            )
+        torch.save(
+            {"model": model.state_dict(), "step": step, "actformer_config": actformer_config},
+            out_dir / "last.pt",
+        )
         print(f"Epoch {epoch} val_loss={val_loss:.4f} best={best_val:.4f}")
     print(f"[actformer] Saved to {out_dir}")
 

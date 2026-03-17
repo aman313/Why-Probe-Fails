@@ -10,9 +10,8 @@ data:
   test_ratio: 1.0
   limit_docs: null
 model:
-  base_model_name: distilgpt2
+  base_model_name: Qwen/Qwen2.5-3B-Instruct
   cache_dir: .cache/huggingface
-  layer_index: 3
   tap_point: resid_post
 extraction:
   max_seq_len: 256

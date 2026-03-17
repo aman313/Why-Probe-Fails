@@ -108,24 +108,24 @@ comparison:
       index_path: outputs/activations/id/index.json
     ood:
       - name: dolly
-        memmap_dir: outputs/activations_ood/dolly/layer_3
+        memmap_dir: outputs/activations_ood/dolly/layer_18
       - name: harmbench
-        memmap_dir: outputs/activations_ood/harmbench/layer_3
+        memmap_dir: outputs/activations_ood/harmbench/layer_18
       - name: advbench
-        memmap_dir: outputs/activations_ood/advbench/layer_3     
+        memmap_dir: outputs/activations_ood/advbench/layer_18     
     
   actformer_checkpoint: outputs/actformer/best.pt
   probe_types: [raw_linear, raw_mlp, actformer_finetuned]
   actformer_finetune:
     lr: 1e-4
-    epochs: 10
+    epochs: 1000
     batch_size: 16
-    freeze_body: false
+    freeze_body: true
     pooling: mean
     l2: 0.01
     grad_clip: 1.0
     # LoRA (use_lora: true to train adapter + head only; merged into checkpoint at save)
-    use_lora: false
+    use_lora: true
     lora_r: 8
     lora_alpha: 16
     lora_dropout: 0.05
@@ -148,6 +148,9 @@ token_eval:
   batch_size: 4
   topk_values: [5, 10]
   save_examples: 200
+  # Log correct predictions (baseline == replaced): set save_correct_examples > 0 to enable
+  save_correct_examples: 0
+  save_correct_examples_per_position: 5  # max per position when save_correct_examples > 0
   output_dir: outputs/actformer_token_eval
   normalization_memmap_dir: null
   actformer_checkpoint: null
